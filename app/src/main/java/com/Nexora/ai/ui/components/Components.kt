@@ -4,10 +4,10 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -24,6 +24,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import com.Nexora.ai.ui.theme.AccentGradient
 import com.Nexora.ai.ui.theme.NexoraMuted
 import com.Nexora.ai.ui.theme.NexoraOnSurface
@@ -31,12 +33,15 @@ import com.Nexora.ai.ui.theme.NexoraSurfaceVar
 
 @Composable
 fun GlassCard(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
-    Box(
+    // Place card content vertically; using Box here caused every row to overlap.
+    Column(
         modifier
-            .clip(RoundedCornerShape(24.dp))
-            .background(NexoraSurfaceVar.copy(alpha = 0.65f))
-            .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(24.dp))
-            .padding(16.dp)
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(22.dp))
+            .background(NexoraSurfaceVar.copy(alpha = 0.72f))
+            .border(1.dp, Color.White.copy(alpha = 0.07f), RoundedCornerShape(22.dp))
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) { content() }
 }
 
@@ -63,7 +68,7 @@ fun SectionTitle(text: String) {
 @Composable
 fun LossChart(values: List<Float>, modifier: Modifier = Modifier) {
     val color = MaterialTheme.colorScheme.primary
-    Canvas(modifier.fillMaxWidth().size(180.dp)) {
+    Canvas(modifier.fillMaxWidth().height(180.dp)) {
         if (values.size < 2) return@Canvas
         val min = values.min(); val max = values.max()
         val range = (max - min).coerceAtLeast(1e-4f)
@@ -98,8 +103,28 @@ fun GradientLabel(text: String) {
 
 @Composable
 fun KeyValueRow(k: String, v: String) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(k, color = NexoraMuted, fontSize = 13.sp)
-        Text(v, color = NexoraOnSurface, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Text(
+            text = k,
+            modifier = Modifier.weight(1f),
+            color = NexoraMuted,
+            fontSize = 12.sp,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            text = v,
+            modifier = Modifier.weight(1.1f),
+            color = NexoraOnSurface,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            textAlign = TextAlign.End,
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
