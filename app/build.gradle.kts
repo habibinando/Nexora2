@@ -2,7 +2,6 @@
 // JDK 21 toolchain, AGP 9.4.0+, NDK r30 (30.0.16248370)
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
 }
