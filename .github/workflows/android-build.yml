@@ -48,7 +48,7 @@ jobs:
           fi
 
       - name: Build debug and release APKs
-        run: ./gradlew --no-daemon --stacktrace :app:assembleDebug :app:assembleRelease
+        run: bash ./gradlew --no-daemon --stacktrace :app:assembleDebug :app:assembleRelease
 
       - name: Upload APKs
         uses: actions/upload-artifact@v4
