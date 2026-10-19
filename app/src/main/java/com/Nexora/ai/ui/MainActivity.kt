@@ -99,9 +99,6 @@ class MainActivity : ComponentActivity() {
 fun LoadingScreen() {
     val transition = rememberInfiniteTransition(label = "load")
     val rot = transition.animateFloat(0f, 360f, infiniteRepeatable(tween(1400, easing = LinearEasing), RepeatMode.Restart), label = "rot")
-    val statuses = listOf("Memuat inti neural…", "Mendeteksi core CPU…", "GPU compute probe…", "Memeriksa checkpoint…")
-    var idx by remember { mutableStateOf(0) }
-    LaunchedEffect(Unit) { while (true) { delay(700); idx = (idx + 1) % statuses.size } }
     Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
         Box(Modifier.size(120.dp), contentAlignment = Alignment.Center) {
             Canvas(Modifier.size(120.dp).rotate(rot.value)) {
@@ -115,7 +112,7 @@ fun LoadingScreen() {
         Text("NEXORA", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = NexoraOnSurface, letterSpacing = 8.sp, modifier = Modifier.padding(top = 24.dp))
         Text("On-device AI language training", color = NexoraMuted, fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp))
         LinearProgressIndicator(Modifier.padding(top = 32.dp, start = 48.dp, end = 48.dp).fillMaxWidth(), color = androidx.compose.material3.MaterialTheme.colorScheme.primary)
-        Text(statuses[idx], color = NexoraMuted, fontSize = 12.sp, modifier = Modifier.padding(top = 16.dp))
+        Text("Memuat antarmuka Nexora…", color = NexoraMuted, fontSize = 12.sp, modifier = Modifier.padding(top = 16.dp))
     }
 }
 
@@ -138,8 +135,8 @@ fun MainScaffold() {
     // Start foreground service whenever training is running.
     LaunchedEffect(Unit) {
         TrainingController.state.collectLatest { s ->
-            if (s.phase == com.Nexora.ai.train.Phase.RUNNING) {
-                context.startService(Intent(context, TrainingService::class.java))
+            if (s.phase == com.Nexora.ai.train.Phase.RUNNING || s.phase == com.Nexora.ai.train.Phase.PAUSED) {
+                context.startForegroundService(Intent(context, TrainingService::class.java))
             }
         }
     }
