@@ -152,7 +152,7 @@ static void gemm_worker(int tid, int nthreads, void* arg) {
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_Nexora_ai_ml_NativeOps_nativeMatMul(
+Java_com_Nexora_ai_ml_NativeOps_jniMatMul(
         JNIEnv* env, jclass, jfloatArray aArr, jfloatArray bArr, jfloatArray cArr,
         jint M, jint K, jint N, jboolean transA, jboolean transB,
         jfloat alpha, jfloat beta) {
