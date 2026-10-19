@@ -1,5 +1,5 @@
 // Nexora — on-device AI language training (no cloud API, no mock)
-// JDK 25 toolchain, AGP 9.4.0+, NDK r30 (30.0.16248370)
+// JDK 21 toolchain, AGP 9.4.0+, NDK r30 (30.0.16248370)
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -29,14 +29,14 @@ android {
                 abiFilters += listOf("arm64-v8a", "x86_64")
             }
         }
-        // Real CPU maximization: use all big cores; JIT/AOT compilation for hot loops
-        packaging {
-            jniLibs { useLegacyPackaging = false }
-            resources.excludes += setOf(
-                "META-INF/{AL2.0,LGPL2.1}",
-                "META-INF/*.kotlin_module"
-            )
-        }
+    }
+
+    packaging {
+        jniLibs { useLegacyPackaging = false }
+        resources.excludes += setOf(
+            "META-INF/{AL2.0,LGPL2.1}",
+            "META-INF/*.kotlin_module"
+        )
     }
 
     buildTypes {
@@ -59,14 +59,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_21
         isCoreLibraryDesugaringEnabled = true
     }
-    kotlin {
-        jvmToolchain(25) // JDK 25
-        compilerOptions {
-            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
-            freeCompilerArgs.add("-opt-in=kotlin.RequiresOptIn")
-        }
-    }
-
     buildFeatures {
         compose = true
         buildConfig = true
@@ -77,6 +69,14 @@ android {
             path = file("src/main/cpp/CMakeLists.txt")
             version = "3.22.1"
         }
+    }
+}
+
+kotlin {
+    jvmToolchain(21)
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
+        freeCompilerArgs.add("-opt-in=kotlin.RequiresOptIn")
     }
 }
 
