@@ -93,7 +93,7 @@ fun LossChart(values: List<Float>, modifier: Modifier = Modifier) {
 @Composable
 fun GradientLabel(text: String) {
     Text(text, fontSize = 22.sp, fontWeight = FontWeight.Bold,
-        brush = AccentGradient, modifier = Modifier.padding(vertical = 4.dp))
+        color = com.Nexora.ai.ui.theme.NexoraPrimary, modifier = Modifier.padding(vertical = 4.dp))
 }
 
 @Composable
