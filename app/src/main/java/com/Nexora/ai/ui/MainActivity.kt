@@ -22,7 +22,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Science
@@ -31,6 +31,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -66,6 +67,7 @@ import com.Nexora.ai.ui.screens.TrainScreen
 import com.Nexora.ai.ui.theme.AccentGradient
 import com.Nexora.ai.ui.theme.NexoraBg
 import com.Nexora.ai.ui.theme.NexoraMuted
+import com.Nexora.ai.ui.theme.NexoraPrimary
 import com.Nexora.ai.ui.theme.NexoraOnSurface
 import com.Nexora.ai.ui.theme.NexoraTheme
 import kotlinx.coroutines.delay
@@ -127,7 +129,7 @@ fun MainScaffold() {
         NavItem("home", "Home", Icons.Filled.Home),
         NavItem("dataset", "Data", Icons.Filled.InsertDriveFile),
         NavItem("train", "Train", Icons.Filled.TrackChanges),
-        NavItem("chat", "Chat", Icons.Filled.Chat),
+        NavItem("chat", "Chat", Icons.AutoMirrored.Filled.Chat),
         NavItem("lab", "Lab", Icons.Filled.Science)
     )
     val back by nav.currentBackStackEntryAsState()
@@ -145,13 +147,38 @@ fun MainScaffold() {
     Scaffold(
         containerColor = NexoraBg,
         bottomBar = {
-            NavigationBar(containerColor = Color(0xFF0A1018)) {
+            NavigationBar(
+                containerColor = Color(0xFF0A1018),
+                contentColor = NexoraOnSurface,
+                tonalElevation = 0.dp
+            ) {
                 items.forEach { item ->
+                    val selected = current == item.route
                     NavigationBarItem(
-                        selected = current == item.route,
-                        onClick = { nav.navigate(item.route) { popUpTo(nav.graph.startDestinationId) { saveState = true }; launchSingleTop = true; restoreState = true } },
-                        icon = { Icon(item.icon, contentDescription = item.label) },
-                        label = { Text(item.label, fontSize = 10.sp) }
+                        selected = selected,
+                        onClick = {
+                            nav.navigate(item.route) {
+                                popUpTo(nav.graph.startDestinationId) { saveState = true }
+                                launchSingleTop = true
+                                restoreState = true
+                            }
+                        },
+                        icon = { Icon(item.icon, contentDescription = item.label, modifier = Modifier.size(22.dp)) },
+                        label = {
+                            Text(
+                                item.label,
+                                fontSize = 10.sp,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
+                            )
+                        },
+                        alwaysShowLabel = false,
+                        colors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = NexoraPrimary,
+                            selectedTextColor = NexoraPrimary,
+                            indicatorColor = NexoraPrimary.copy(alpha = 0.14f),
+                            unselectedIconColor = NexoraMuted,
+                            unselectedTextColor = NexoraMuted
+                        )
                     )
                 }
             }
