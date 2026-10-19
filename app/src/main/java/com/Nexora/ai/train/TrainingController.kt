@@ -146,7 +146,15 @@ object TrainingController {
 
     fun startTraining(hp: HyperParams) {
         val m = model ?: run { _state.value = _state.value.copy(phase = Phase.ERROR, message = "Belum ada model/dataset. Impor dataset dulu."); return }
-        if (corpus.size < m.cfg.seqLen * 2) { _state.value = _state.value.copy(phase = Phase.ERROR, message = "Corpus terlalu kecil."); return }
+        val span = m.cfg.seqLen + 1
+        val requiredTokens = span.toLong() * (hp.batchSize + 1L)
+        if (corpus.size.toLong() < requiredTokens) {
+            _state.value = _state.value.copy(
+                phase = Phase.ERROR,
+                message = "Dataset terlalu kecil untuk sequence ${m.cfg.seqLen} dan batch ${hp.batchSize}; diperlukan minimal $requiredTokens token."
+            )
+            return
+        }
         if (hp.numThreads > 0) NativeOps.nativeSetThreads(hp.numThreads) else NativeOps.nativeSetThreads(NativeOps.nativeCpuCores())
         stopped = false; paused = false
         job?.cancel()
@@ -167,8 +175,13 @@ object TrainingController {
         val rng = Random(2026)
 
         // Train / validation split (95/5)
-        val valSize = (corpus.size * 0.05).toInt().coerceAtLeast(S * 2)
+        val span = S + 1
+        val valSize = maxOf((corpus.size * 0.05).toInt(), B * span)
         val trainEnd = corpus.size - valSize
+        if (trainEnd < span || valSize < B * span) {
+            _state.value = _state.value.copy(phase = Phase.ERROR, message = "Dataset tidak cukup untuk train/validation split.")
+            return
+        }
 
         val pairs = m.trainablePairs()
         val optimizer = AdamW(pairs, weightDecay = hp.weightDecay)
@@ -194,9 +207,8 @@ object TrainingController {
             val stepStart = System.currentTimeMillis()
             // Sample random batch windows
             val input = IntArray(T); val target = IntArray(T)
-            val span = S + 1
             for (b in 0 until B) {
-                val start = rng.nextInt(trainEnd - span)
+                val start = rng.nextInt(trainEnd - span + 1)
                 for (s in 0 until S) {
                     input[b * S + s] = corpus[start + s]
                     target[b * S + s] = corpus[start + s + 1]
@@ -260,12 +272,12 @@ object TrainingController {
         val T = B * S
         var total = 0f; var n = 0
         val input = IntArray(T); val target = IntArray(T)
-        val batches = (valSize / (B * (S + 1))).coerceAtMost(4)
+        val batches = (valSize / (B * (S + 1))).coerceIn(1, 4)
         for (it in 0 until batches) {
             val base = trainEnd + it * B * (S + 1)
             for (b in 0 until B) {
                 val st = base + b * (S + 1)
-                if (st + S + 1 >= corpus.size) break
+                if (st + S >= corpus.size) break
                 for (s in 0 until S) { input[b * S + s] = corpus[st + s]; target[b * S + s] = corpus[st + s + 1] }
             }
             val logits = m.forward(input, B, S, training = false)
