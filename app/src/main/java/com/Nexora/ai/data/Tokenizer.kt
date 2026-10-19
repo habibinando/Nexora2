@@ -69,7 +69,7 @@ class Tokenizer private constructor(
         const val SPECIAL = 4
         const val BYTES = 256
 
-        private val PIECE_REGEX = Regex("""[A-Za-z0-9]+|[^\sA-Za-z0-9]""")
+        private val PIECE_REGEX = Regex("""[A-Za-z0-9]+|\s+|[^\sA-Za-z0-9]+""")
 
         fun splitToPieces(text: String): List<String> = PIECE_REGEX.findAll(text).map { it.value }.toList()
 
