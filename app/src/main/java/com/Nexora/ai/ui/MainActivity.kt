@@ -5,7 +5,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.infiniteRepeatable
@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
@@ -107,7 +108,7 @@ fun LoadingScreen() {
                     style = Stroke(width = 10f, cap = StrokeCap.Round)
                 )
             }
-            Text("N", fontSize = 44.sp, fontWeight = FontWeight.Black, brush = AccentGradient)
+            Text("N", fontSize = 44.sp, fontWeight = FontWeight.Black, color = com.Nexora.ai.ui.theme.NexoraPrimary)
         }
         Text("NEXORA", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = NexoraOnSurface, letterSpacing = 8.sp, modifier = Modifier.padding(top = 24.dp))
         Text("On-device AI language training", color = NexoraMuted, fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp))
