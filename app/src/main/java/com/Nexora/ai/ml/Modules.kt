@@ -204,8 +204,9 @@ class CausalSelfAttention(val cfg: ModelConfig, rng: Random) {
     private var Q: FloatArray? = null // BH x S x hd
     private var K: FloatArray? = null
     private var V: FloatArray? = null
-    private var attn: FloatArray? = null // BH x S x S (after softmax, before dropout)
-    private var dropMask: FloatArray? = null
+    private var attn: FloatArray? = null // BH x S x S, probabilities after dropout
+    private var softmaxAttn: FloatArray? = null // BH x S x S, probabilities before dropout
+    private var dropMask: FloatArray? = null // BH x S x S, one independent mask per head
 
     fun forward(x: FloatArray, B: Int, S: Int, training: Boolean, rng: Random): FloatArray {
         this.B = B; this.S = S
@@ -230,6 +231,10 @@ class CausalSelfAttention(val cfg: ModelConfig, rng: Random) {
         Q = Qr; K = Kr; V = Vr
         val scale = 1f / sqrt(hd.toFloat())
         val At = FloatArray(BH * S * S)
+        val softAt = FloatArray(BH * S * S)
+        val masks = if (training && cfg.dropout > 0f) {
+            FloatArray(BH * S * S) { if (rng.nextFloat() < cfg.dropout) 0f else 1f / (1f - cfg.dropout) }
+        } else null
         val out = FloatArray(BH * S * hd)
         for (bh in 0 until BH) {
             val ao = bh * S * S; val qo = bh * S * hd; val ko = bh * S * hd; val vo = bh * S * hd
@@ -242,12 +247,8 @@ class CausalSelfAttention(val cfg: ModelConfig, rng: Random) {
                 }
                 MathUtil.softmaxRow(At, ao + i * S, S)
             }
-            // dropout on attention
-            if (training && cfg.dropout > 0f) {
-                val mask = FloatArray(S * S) { if (rng.nextFloat() < cfg.dropout) 0f else 1f / (1f - cfg.dropout) }
-                dropMask = mask
-                for (i in 0 until S) for (j in 0 until S) At[ao + i * S + j] *= mask[i * S + j]
-            } else dropMask = null
+            System.arraycopy(At, ao, softAt, ao, S * S)
+            if (masks != null) for (i in 0 until S * S) At[ao + i] *= masks[ao + i]
             // out = At @ V  (S x S) @ (S x hd)
             for (i in 0 until S) {
                 for (e in 0 until hd) {
@@ -258,6 +259,8 @@ class CausalSelfAttention(val cfg: ModelConfig, rng: Random) {
             }
         }
         attn = At
+        softmaxAttn = softAt
+        dropMask = masks
         // rearrange out back to T x d
         val y = FloatArray(T * d)
         for (b in 0 until B) for (h in 0 until H) for (s in 0 until S) {
@@ -281,12 +284,15 @@ class CausalSelfAttention(val cfg: ModelConfig, rng: Random) {
             val dst = (bh * S + s) * hd
             System.arraycopy(gYproj, src, gOut, dst, hd)
         }
-        val At = attn!!; val Vr = V!!; val Qr = Q!!; val Kr = K!!
+        val At = attn!!
+        val probabilities = softmaxAttn!!
+        val Vr = V!!; val Qr = Q!!; val Kr = K!!
         val gAt = FloatArray(BH * S * S)
         val gV = FloatArray(BH * S * hd)
         val gQ = FloatArray(BH * S * hd)
         val gK = FloatArray(BH * S * hd)
         val mask = dropMask
+        val scoreScale = 1f / sqrt(hd.toFloat())
         for (bh in 0 until BH) {
             val ao = bh * S * S; val qo = bh * S * hd; val ko = bh * S * hd; val vo = bh * S * hd
             // gV = At^T @ gOut ; gAt = gOut @ V^T
@@ -300,15 +306,17 @@ class CausalSelfAttention(val cfg: ModelConfig, rng: Random) {
                 for (e in 0 until hd) s += gOut[qo + i * hd + e] * Vr[vo + j * hd + e]
                 gAt[ao + i * S + j] = s
             }
-            // dropout backward
-            if (mask != null) for (i in 0 until S * S) gAt[ao + i] *= mask[i]
-            // softmax backward: dS = At * (gAt - rowSum(gAt * At))
+            // Dropout backward, then softmax backward using the pre-dropout probabilities.
+            if (mask != null) for (i in 0 until S * S) gAt[ao + i] *= mask[ao + i]
             for (i in 0 until S) {
                 var rowSum = 0f
-                for (j in 0 until S) rowSum += gAt[ao + i * S + j] * At[ao + i * S + j]
                 for (j in 0 until S) {
-                    val ds = At[ao + i * S + j] * (gAt[ao + i * S + j] - rowSum)
-                    gAt[ao + i * S + j] = ds
+                    val idx = ao + i * S + j
+                    rowSum += gAt[idx] * probabilities[idx]
+                }
+                for (j in 0 until S) {
+                    val idx = ao + i * S + j
+                    gAt[idx] = probabilities[idx] * (gAt[idx] - rowSum)
                 }
             }
             // causal: j>i grad should be zero (masked) — already softmaxed to 0, ds ~0, but enforce
@@ -320,8 +328,8 @@ class CausalSelfAttention(val cfg: ModelConfig, rng: Random) {
                     sq += gAt[ao + i * S + j] * Kr[ko + j * hd + e]
                     sk += gAt[ao + j * S + i] * Qr[qo + j * hd + e]
                 }
-                gQ[qo + i * hd + e] = sq
-                gK[ko + i * hd + e] = sk
+                gQ[qo + i * hd + e] = sq * scoreScale
+                gK[ko + i * hd + e] = sk * scoreScale
             }
         }
         // rearrange gQ,gK,gV back to T x d and concat
