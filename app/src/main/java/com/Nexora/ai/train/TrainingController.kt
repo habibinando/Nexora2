@@ -13,6 +13,7 @@ import com.Nexora.ai.ml.ModelConfig
 import com.Nexora.ai.ml.NativeOps
 import com.Nexora.ai.ml.crossEntropy
 import com.Nexora.ai.ui.AppSettings
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -182,14 +183,42 @@ object TrainingController {
             return
         }
         if (hp.numThreads > 0) NativeOps.nativeSetThreads(hp.numThreads) else NativeOps.nativeSetThreads(NativeOps.nativeCpuCores())
-        stopped = false; paused = false
+        stopped = false
+        paused = false
         job?.cancel()
-        job = scope.launch { trainLoop(m, hp) }
+        _state.value = _state.value.copy(phase = Phase.RUNNING, message = "Menyiapkan training lokal…")
+        job = scope.launch {
+            try {
+                trainLoop(m, hp)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: OutOfMemoryError) {
+                _state.value = _state.value.copy(
+                    phase = Phase.ERROR,
+                    message = "Memori tidak cukup. Kurangi batch size, context, dimensi model, atau jumlah layer."
+                )
+            } catch (e: Exception) {
+                _state.value = _state.value.copy(
+                    phase = Phase.ERROR,
+                    message = "Training gagal: ${e.message ?: e::class.java.simpleName}"
+                )
+            }
+        }
     }
 
-    fun pause() { paused = true; _state.value = _state.value.copy(phase = Phase.PAUSED, message = "Dijeda.") }
-    fun resume() { paused = false; _state.value = _state.value.copy(phase = Phase.RUNNING, message = "Dilanjutkan.") }
-    fun stop() { stopped = true; paused = false }
+    fun pause() {
+        paused = true
+        _state.value = _state.value.copy(phase = Phase.PAUSED, message = "Jeda diminta; step aktif diselesaikan terlebih dahulu…")
+    }
+    fun resume() {
+        paused = false
+        _state.value = _state.value.copy(phase = Phase.RUNNING, message = "Training dilanjutkan.")
+    }
+    fun stop() {
+        stopped = true
+        paused = false
+        _state.value = _state.value.copy(message = "Stop diminta; menyelesaikan step aktif lalu menyimpan checkpoint…")
+    }
 
     private suspend fun trainLoop(m: GPT, hp: HyperParams) {
         _state.value = _state.value.copy(phase = Phase.RUNNING, message = "Training dimulai…")
@@ -242,9 +271,16 @@ object TrainingController {
                     target[b * S + s] = corpus[start + s + 1]
                 }
             }
+            _state.value = _state.value.copy(message = "Forward pass — step ${step + 1}/${hp.maxSteps}. Menghitung prediksi model…")
             m.zeroGrad()
             val logits = m.forward(input, B, S, training = true)
             val loss = crossEntropy(logits, target, vocab, gradLogits)
+            if (!loss.isFinite()) {
+                _state.value = _state.value.copy(phase = Phase.ERROR, message = "Loss bukan angka valid; training dihentikan.")
+                return
+            }
+
+            _state.value = _state.value.copy(message = "Backpropagation — step ${step + 1}/${hp.maxSteps}. Menghitung gradien…")
             m.backward(gradLogits)
 
             // Gradient clipping
@@ -254,6 +290,7 @@ object TrainingController {
                 val sc = hp.gradClip / gNorm
                 for (g in grads) MathUtil.scale(g, sc)
             }
+            _state.value = _state.value.copy(message = "Optimizer — menerapkan perubahan bobot step ${step + 1}…")
             val lr = scheduler.lrAt(step)
             optimizer.step(lr)
             step = optimizer.step
@@ -270,6 +307,7 @@ object TrainingController {
 
             var valLoss = _state.value.valLoss
             if (step % hp.evalEvery == 0) {
+                _state.value = _state.value.copy(message = "Evaluasi validation loss — step $step…")
                 valLoss = evaluate(m, vocab, trainEnd, valSize, B, S, gradLogits)
                 if (valLoss < bestVal - 1e-4f) { bestVal = valLoss; patienceCount = 0 }
                 else {
@@ -282,15 +320,22 @@ object TrainingController {
                 }
             }
 
-            _state.value = buildState(step, loss, valLoss, bestVal, lr, gNorm, tps, elapsed, eta, history, Phase.RUNNING, "Training… step $step/${hp.maxSteps}")
+            val activePhase = if (paused) Phase.PAUSED else Phase.RUNNING
+            val activeMessage = if (paused) "Step $step selesai; training dijeda." else "Training aktif — step $step/${hp.maxSteps}"
+            _state.value = buildState(step, loss, valLoss, bestVal, lr, gNorm, tps, elapsed, eta, history, activePhase, activeMessage)
 
             if (step % hp.saveEvery == 0) {
+                _state.value = _state.value.copy(message = "Menyimpan checkpoint — step $step…")
                 saveCheckpoint(m, optimizer, tok, step, bestVal, patienceCount, history, tokensSeen)
                 _state.value = _state.value.copy(message = "Checkpoint disimpan (step $step). Bobot terus bertambah.")
             }
         }
+        _state.value = _state.value.copy(message = "Menyimpan checkpoint akhir…")
         saveCheckpoint(m, optimizer, tok, step, bestVal, patienceCount, history, tokensSeen)
-        _state.value = _state.value.copy(phase = if (stopped) Phase.READY else Phase.FINISHED, message = if (stopped) "Dihentikan pengguna. Checkpoint disimpan." else "Selesai! Checkpoint final disimpan.")
+        _state.value = _state.value.copy(
+            phase = if (stopped) Phase.READY else Phase.FINISHED,
+            message = if (stopped) "Dihentikan pengguna. Checkpoint disimpan." else "Selesai! Checkpoint final disimpan."
+        )
     }
 
     private fun buildState(step: Int, loss: Float, valLoss: Float, best: Float, lr: Float, gNorm: Float, tps: Float, elapsed: Long, eta: Long, hist: List<Float>, phase: Phase, msg: String) =
