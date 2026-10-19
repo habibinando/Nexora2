@@ -175,7 +175,7 @@ fun MainScaffold() {
                         colors = NavigationBarItemDefaults.colors(
                             selectedIconColor = NexoraPrimary,
                             selectedTextColor = NexoraPrimary,
-                            selectedIndicatorColor = NexoraPrimary.copy(alpha = 0.14f),
+                            indicatorColor = NexoraPrimary.copy(alpha = 0.14f),
                             unselectedIconColor = NexoraMuted,
                             unselectedTextColor = NexoraMuted
                         )
