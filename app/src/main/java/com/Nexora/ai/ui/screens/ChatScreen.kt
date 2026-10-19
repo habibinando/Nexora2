@@ -95,7 +95,7 @@ fun ChatScreen() {
                     scope.launch {
                         withContext(Dispatchers.Default) {
                             Inference.generate(model, tokenizer, prompt, Inference.GenConfig(maxNewTokens = 80)) { tok ->
-                                assistant.text += tok
+                                assistant.text = tok
                             }
                         }
                         busy = false
