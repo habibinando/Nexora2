@@ -23,18 +23,18 @@ object Inference {
         var ctx = tokenizer.encode(prompt, addBos = true, addEos = false).toMutableList()
         val outIds = mutableListOf<Int>()
         val S = model.cfg.seqLen
-        repeat(cfg.maxNewTokens) {
+        for (step in 0 until cfg.maxNewTokens) {
             val window = ctx.takeLast(S).toIntArray()
             val logits = model.forward(window, 1, window.size, training = false)
-            // logits: T x vocab ; take last row
+            // logits: T x vocab; take the last row.
             val vocab = model.cfg.vocabSize
             val rowOffset = (window.size - 1) * vocab
-            // sample
             val next = sample(logits, rowOffset, vocab, cfg.temperature, cfg.topK, rng)
-            if (next == tokenizer.eosId) return@repeat
-            ctx += next; outIds += next
-            onToken(tokenizer.decode(intArrayOf(next)))
-            if (outIds.size >= cfg.maxNewTokens) return@repeat
+            if (next == tokenizer.eosId) break
+            ctx += next
+            outIds += next
+            // Emit the whole decoded prefix so UTF-8 byte-fallback tokens remain valid.
+            onToken(tokenizer.decode(outIds.toIntArray()))
         }
         return tokenizer.decode(outIds.toIntArray())
     }
