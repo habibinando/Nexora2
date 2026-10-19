@@ -1,6 +1,8 @@
 package com.Nexora.ai.ml
 
+import kotlin.math.cos
 import kotlin.math.exp
+import kotlin.math.sin
 import kotlin.math.ln
 import kotlin.math.sqrt
 import kotlin.random.Random
