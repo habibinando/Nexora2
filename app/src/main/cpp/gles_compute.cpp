@@ -172,3 +172,42 @@ Java_com_Nexora_ai_ml_NativeOps_nativeGpuBench(
     auto t1 = std::chrono::steady_clock::now();
     return std::chrono::duration<double, std::milli>(t1 - t0).count() / iter;
 }
+
+
+// Large forward GEMMs may use the GLES backend. The caller falls back to the
+// optimized CPU implementation when initialization or execution is unavailable.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_Nexora_ai_ml_NativeOps_nativeGpuMatMul(
+        JNIEnv* env, jclass, jfloatArray aArr, jfloatArray bArr, jfloatArray cArr,
+        jint M, jint K, jint N) {
+    if (M <= 0 || K <= 0 || N <= 0) return JNI_FALSE;
+    const jlong aNeed = static_cast<jlong>(M) * K;
+    const jlong bNeed = static_cast<jlong>(K) * N;
+    const jlong cNeed = static_cast<jlong>(M) * N;
+    if (env->GetArrayLength(aArr) < aNeed ||
+        env->GetArrayLength(bArr) < bNeed ||
+        env->GetArrayLength(cArr) < cNeed) return JNI_FALSE;
+
+    auto* s = state();
+    if (!s->ok) return JNI_FALSE;
+
+    jfloat* A = env->GetFloatArrayElements(aArr, nullptr);
+    if (!A) return JNI_FALSE;
+    jfloat* B = env->GetFloatArrayElements(bArr, nullptr);
+    if (!B) {
+        env->ReleaseFloatArrayElements(aArr, A, JNI_ABORT);
+        return JNI_FALSE;
+    }
+    jfloat* C = env->GetFloatArrayElements(cArr, nullptr);
+    if (!C) {
+        env->ReleaseFloatArrayElements(aArr, A, JNI_ABORT);
+        env->ReleaseFloatArrayElements(bArr, B, JNI_ABORT);
+        return JNI_FALSE;
+    }
+
+    const bool ok = s->matmul(A, B, C, M, K, N);
+    env->ReleaseFloatArrayElements(aArr, A, JNI_ABORT);
+    env->ReleaseFloatArrayElements(bArr, B, JNI_ABORT);
+    env->ReleaseFloatArrayElements(cArr, C, ok ? 0 : JNI_ABORT);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
