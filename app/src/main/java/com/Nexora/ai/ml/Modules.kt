@@ -511,7 +511,7 @@ fun crossEntropy(logits: FloatArray, targets: IntArray, vocab: Int, gradLogits: 
         val o = t * vocab
         MathUtil.softmaxRow(logits, o, vocab)
         val p = logits[o + targets[t]].coerceAtLeast(1e-9f)
-        loss += -kotlin.math.log(p)
+        loss += -kotlin.math.ln(p)
         for (v in 0 until vocab) gradLogits[o + v] = (logits[o + v] - if (v == targets[t]) 1f else 0f) / T
     }
     return loss / T
