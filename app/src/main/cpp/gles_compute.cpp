@@ -74,8 +74,9 @@ struct GpuState {
         const char* ver = (const char*)glGetString(GL_VERSION);
         const char* rend = (const char*)glGetString(GL_RENDERER);
         info = std::string(ver ? ver : "?") + " | " + (rend ? rend : "?");
-        int major = 0; if (ver) sscanf(ver, "OpenGL ES %d.", &major);
-        if (major < 3) { eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT); return false; }
+        int major = 0, minor = 0;
+        if (ver) sscanf(ver, "OpenGL ES %d.%d", &major, &minor);
+        if (major < 3 || (major == 3 && minor < 1)) { eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT); return false; }
 
         GLuint sh = glCreateShader(GL_COMPUTE_SHADER);
         glShaderSource(sh, 1, &COMPUTE_SRC, nullptr);
@@ -125,10 +126,13 @@ struct GpuState {
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, bufC);
         GLuint gx = (N + 15) / 16, gy = (M + 15) / 16;
         glDispatchCompute(gx, gy, 1);
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, bufC);
-        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, nc, C);
-        return true;
+        void* mapped = glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, static_cast<GLsizeiptr>(nc), GL_MAP_READ_BIT);
+        if (!mapped) return false;
+        std::memcpy(C, mapped, nc);
+        const GLboolean unmapped = glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+        return unmapped == GL_TRUE;
     }
 };
 
