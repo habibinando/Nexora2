@@ -1,5 +1,5 @@
 // Nexora — on-device AI language training (no cloud API, no mock)
-// JDK 21 toolchain, AGP 9.4.0+, NDK r30 (30.0.16248370)
+// JDK 25 build toolchain; Android bytecode target remains Java 21.
 plugins {
     alias(libs.plugins.appPlugin)
     alias(libs.plugins.kotlin.compose)
@@ -72,7 +72,7 @@ android {
 }
 
 kotlin {
-    jvmToolchain(21)
+    jvmToolchain(25)
     compilerOptions {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
         freeCompilerArgs.add("-opt-in=kotlin.RequiresOptIn")
