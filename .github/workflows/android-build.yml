@@ -30,12 +30,15 @@ jobs:
           java-version: "25"
           cache: gradle
 
-      - name: Verify JDK and Gradle runtime
+      - name: Verify JDK 25 and Gradle runtime
         shell: bash
         run: |
+          set -euo pipefail
           java -version
-          ./gradlew --version
-          ./gradlew --version | grep -q 'JVM:.*25' || { echo "::error::Gradle is not running on JDK 25"; exit 1; }
+          JAVA_MAJOR="$(java -XshowSettings:properties -version 2>&1 | sed -n 's/^[[:space:]]*java.specification.version = //p')"
+          test "$JAVA_MAJOR" = "25" || { echo "::error::Expected JDK 25, got $JAVA_MAJOR"; exit 1; }
+          # gradlew may not preserve its executable bit in a downloaded archive; invoke via bash.
+          bash ./gradlew --version
 
       - name: Configure preinstalled Android SDK
         shell: bash
