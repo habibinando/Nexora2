@@ -29,7 +29,13 @@ object DatasetImporter {
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
-    fun import(context: Context, uri: Uri, vocabSize: Int, onProgress: (Float, String) -> Unit): Result {
+    fun import(
+        context: Context,
+        uri: Uri,
+        vocabSize: Int,
+        tokenizerOverride: Tokenizer? = null,
+        onProgress: (Float, String) -> Unit
+    ): Result {
         val pfd = context.contentResolver.openAssetFileDescriptor(uri, "r")
             ?: throw IllegalStateException("Cannot open file")
         val size = pfd.length.coerceAtLeast(0)
@@ -80,7 +86,8 @@ object DatasetImporter {
         reader.close()
 
         onProgress(0.95f, "Building vocab (${freq.size} unique pieces)…")
-        val tokenizer = Tokenizer.build(freq, vocabSize)
+        val tokenizer = tokenizerOverride?.takeIf { it.vocabSize == vocabSize }
+            ?: Tokenizer.build(freq, vocabSize)
 
         // Second pass: tokenize examples into a flat IntArray corpus.
         val tokensList = ArrayList<Int>(1_000_000)
