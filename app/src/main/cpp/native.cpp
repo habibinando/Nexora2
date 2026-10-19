@@ -34,6 +34,7 @@ struct Pool {
     std::atomic<int> next_tid{0};
     std::atomic<int> ready{0};
     int pending = 0;
+    int active = 1;
     bool shutdown = false;
     void (*fn)(int tid, int nthreads, void* arg) = nullptr;
     void* arg = nullptr;
@@ -47,13 +48,16 @@ struct Pool {
             pool->cv.wait(lk, [&]{ return pool->fn != nullptr || pool->shutdown; });
             if (pool->shutdown) return nullptr;
             auto fn = pool->fn; auto* arg = pool->arg;
-            int nthreads = pool->n;
+            int nthreads = pool->active;
+            const bool shouldRun = tid < nthreads;
             lk.unlock();
-            fn(tid, nthreads, arg);
+            if (shouldRun) fn(tid, nthreads, arg);
             lk.lock();
-            int rem = --pool->pending;
-            if (rem == 0) pool->done_cv.notify_one();
-            pool->cv.wait(lk, [&]{ return pool->fn == nullptr && !pool->shutdown; });
+            if (shouldRun) {
+                int rem = --pool->pending;
+                if (rem == 0) pool->done_cv.notify_one();
+            }
+            pool->cv.wait(lk, [&]{ return pool->fn == nullptr || pool->shutdown; });
         }
     }
     void start(int nthreads) {
@@ -65,9 +69,10 @@ struct Pool {
         }
         while (ready.load(std::memory_order_seq_cst) < n) std::this_thread::yield();
     }
-    void run(void (*fn)(int,int,void*), void* arg) {
+    void run(void (*fn)(int,int,void*), void* arg, int requestedThreads) {
         std::unique_lock<std::mutex> lk(mtx);
-        this->fn = fn; this->arg = arg; pending = n;
+        active = requestedThreads < 1 ? 1 : (requestedThreads > n ? n : requestedThreads);
+        this->fn = fn; this->arg = arg; pending = active;
         cv.notify_all();
         done_cv.wait(lk, [&]{ return pending == 0; });
         this->fn = nullptr; this->arg = nullptr;
@@ -162,7 +167,7 @@ Java_com_Nexora_ai_ml_NativeOps_nativeMatMul(
     if (work < (1LL << 18) || g_num_threads <= 1) {
         gemm_worker(0, 1, &arg);
     } else {
-        g_pool.run(gemm_worker, &arg);
+        g_pool.run(gemm_worker, &arg, g_num_threads);
     }
     env->ReleaseFloatArrayElements(aArr, A, JNI_ABORT);
     env->ReleaseFloatArrayElements(bArr, B, JNI_ABORT);
@@ -264,7 +269,7 @@ Java_com_Nexora_ai_ml_NativeOps_nativeBenchMatMul(
     for (int i = 0; i < 3; i++) gemm_worker(0, 1, &arg);
     auto t0 = std::chrono::steady_clock::now();
     for (int i = 0; i < iter; i++) {
-        if (g_num_threads > 1) g_pool.run(gemm_worker, &arg); else gemm_worker(0, 1, &arg);
+        if (g_num_threads > 1) g_pool.run(gemm_worker, &arg, g_num_threads); else gemm_worker(0, 1, &arg);
     }
     auto t1 = std::chrono::steady_clock::now();
     double ms = std::chrono::duration<double, std::milli>(t1 - t0).count() / iter;
