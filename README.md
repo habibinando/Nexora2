@@ -6,7 +6,7 @@ langsung di ponsel. Tanpa cloud API, tanpa mock, tanpa contoh bawaan, tanpa kata
 checkpoint periodik sehingga **bobot terus bertambah** antar sesi.
 
 ## Toolchain
-- JDK 25 (`jvmToolchain(25)`)
+- JDK 21 (`jvmToolchain(21)`)
 - Gradle 9.8.1 (wrapper)
 - AGP 9.4.0
 - NDK r30 LTS (`ndkVersion "30.0.16248370"`)
