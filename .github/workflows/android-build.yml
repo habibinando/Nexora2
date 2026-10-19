@@ -23,12 +23,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Set up JDK 21
+      - name: Set up JDK 25
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: "25"
           cache: gradle
+
+      - name: Verify JDK and Gradle runtime
+        shell: bash
+        run: |
+          java -version
+          ./gradlew --version
+          ./gradlew --version | grep -q 'JVM:.*25' || { echo "::error::Gradle is not running on JDK 25"; exit 1; }
 
       - name: Configure preinstalled Android SDK
         shell: bash
@@ -44,13 +51,25 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | sdkmanager --licenses > /dev/null || true
 
-      - name: Install required Android SDK packages
+      - name: Install and verify required Android SDK packages
+        shell: bash
         run: |
+          set -euo pipefail
           sdkmanager --install "platforms;android-37.0" "build-tools;36.0.0" "ndk;30.0.16248370" "cmake;3.22.1"
-          # Some SDK repositories publish API 37 under android-37.0; AGP expects android-37.
-          if [ -d "$ANDROID_HOME/platforms/android-37.0" ] && [ ! -e "$ANDROID_HOME/platforms/android-37" ]; then
-            ln -s "$ANDROID_HOME/platforms/android-37.0" "$ANDROID_HOME/platforms/android-37"
+
+          # API 37 may be published as android-37.0 while AGP probes android-37.
+          PLATFORM_DIR="$ANDROID_HOME/platforms/android-37.0"
+          test -s "$PLATFORM_DIR/android.jar" || {
+            echo "::error::SDK installer completed but platforms/android-37.0/android.jar is missing."
+            find "$ANDROID_HOME/platforms" -maxdepth 2 -type f -name android.jar -print || true
+            exit 1
+          }
+          if [ ! -e "$ANDROID_HOME/platforms/android-37" ]; then
+            ln -s "$PLATFORM_DIR" "$ANDROID_HOME/platforms/android-37"
           fi
+          test -s "$ANDROID_HOME/platforms/android-37/android.jar"
+          test -d "$ANDROID_HOME/ndk/30.0.16248370"
+          test -d "$ANDROID_HOME/cmake/3.22.1"
 
       - name: Build debug and release APKs
         run: bash ./gradlew --no-daemon --stacktrace :app:assembleDebug :app:assembleRelease
