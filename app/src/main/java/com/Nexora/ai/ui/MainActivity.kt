@@ -68,6 +68,7 @@ import com.Nexora.ai.ui.theme.NexoraMuted
 import com.Nexora.ai.ui.theme.NexoraOnSurface
 import com.Nexora.ai.ui.theme.NexoraTheme
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -133,7 +134,7 @@ fun MainScaffold() {
 
     // Start foreground service whenever training is running.
     LaunchedEffect(Unit) {
-        kotlinx.coroutines.flow.collectLatest(TrainingController.state) { s ->
+        TrainingController.state.collectLatest { s ->
             if (s.phase == com.Nexora.ai.train.Phase.RUNNING) {
                 context.startService(Intent(context, TrainingService::class.java))
             }
