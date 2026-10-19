@@ -1,0 +1,282 @@
+package com.Nexora.ai.train
+
+import android.content.Context
+import android.net.Uri
+import com.Nexora.ai.data.CheckpointManager
+import com.Nexora.ai.data.DatasetImporter
+import com.Nexora.ai.data.Tokenizer
+import com.Nexora.ai.ml.AdamW
+import com.Nexora.ai.ml.CosineWarmupScheduler
+import com.Nexora.ai.ml.GPT
+import com.Nexora.ai.ml.MathUtil
+import com.Nexora.ai.ml.ModelConfig
+import com.Nexora.ai.ml.NativeOps
+import com.Nexora.ai.ml.crossEntropy
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlin.random.Random
+
+enum class Phase { IDLE, IMPORTING, READY, RUNNING, PAUSED, EARLY_STOPPED, FINISHED, ERROR }
+
+data class HyperParams(
+    val learningRate: Float = 3e-4f,
+    val batchSize: Int = 4,
+    val warmupSteps: Int = 100,
+    val maxSteps: Int = 5000,
+    val saveEvery: Int = 200,
+    val evalEvery: Int = 100,
+    val patience: Int = 5,
+    val gradClip: Float = 1.0f,
+    val weightDecay: Float = 0.01f,
+    val numThreads: Int = 0 // 0 = all cores
+)
+
+data class TrainState(
+    val phase: Phase = Phase.IDLE,
+    val step: Int = 0,
+    val epoch: Int = 0,
+    val loss: Float = 0f,
+    val valLoss: Float = 0f,
+    val bestValLoss: Float = Float.MAX_VALUE,
+    val lr: Float = 0f,
+    val gradNorm: Float = 0f,
+    val tokensPerSec: Float = 0f,
+    val elapsedMs: Long = 0L,
+    val etaMs: Long = 0L,
+    val lossHistory: List<Float> = emptyList(),
+    val message: String = "",
+    val datasetName: String = "",
+    val numTokens: Int = 0,
+    val numExamples: Long = 0,
+    val vocabSize: Int = 16000,
+    val totalParams: Long = 0,
+    val trainableParams: Long = 0,
+    val importProgress: Float = 0f
+)
+
+/**
+ * Singleton training controller — the real training loop lives here.
+ * UI and foreground service both observe [state]. No mock, no cloud API.
+ */
+object TrainingController {
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val mutex = Mutex()
+    private var job: Job? = null
+
+    private val _state = MutableStateFlow(TrainState())
+    val state: StateFlow<TrainState> = _state.asStateFlow()
+
+    @Volatile var model: GPT? = null; private set
+    @Volatile var tokenizer: Tokenizer? = null; private set
+    private var corpus: IntArray = IntArray(0)
+    private lateinit var checkpointManager: CheckpointManager
+    private lateinit var appContext: Context
+
+    @Volatile private var paused = false
+    @Volatile private var stopped = false
+
+    fun init(context: Context) {
+        appContext = context.applicationContext
+        checkpointManager = CheckpointManager(context.filesDir.resolve("checkpoint"))
+        NativeOps.nativeSetThreads(NativeOps.nativeCpuCores())
+        // Resume weights if present ("bobot terus bertambah")
+        val cfg = checkpointManager.loadConfig()
+        if (cfg != null) {
+            val m = GPT(cfg)
+            if (checkpointManager.loadTensors(m)) {
+                model = m
+                tokenizer = checkpointManager.loadTokenizer()
+                val meta = checkpointManager.loadMeta()
+                _state.value = _state.value.copy(
+                    phase = Phase.READY,
+                    step = meta?.step ?: 0,
+                    epoch = meta?.epoch ?: 0,
+                    bestValLoss = meta?.bestValLoss ?: Float.MAX_VALUE,
+                    lossHistory = meta?.lossHistory ?: emptyList(),
+                    vocabSize = cfg.vocabSize,
+                    totalParams = m.numParams,
+                    trainableParams = m.trainableParams,
+                    message = "Checkpoint dimuat — bobot tersimpan siap dilanjutkan."
+                )
+            }
+        }
+    }
+
+    fun importDataset(uri: Uri, modelCfg: ModelConfig) {
+        scope.launch {
+            mutex.withLock {
+                _state.value = _state.value.copy(phase = Phase.IMPORTING, message = "Mengimpor dataset…", importProgress = 0f)
+                try {
+                    val result = DatasetImporter.import(appContext, uri, modelCfg.vocabSize) { p, msg ->
+                        _state.value = _state.value.copy(importProgress = p, message = msg)
+                    }
+                    tokenizer = result.tokenizer
+                    corpus = result.tokens
+                    val m = GPT(modelCfg.copy(vocabSize = result.tokenizer.vocabSize))
+                    // If a checkpoint exists with same vocab, resume weights
+                    val savedCfg = checkpointManager.loadConfig()
+                    if (savedCfg?.vocabSize == result.tokenizer.vocabSize) checkpointManager.loadTensors(m)
+                    model = m
+                    _state.value = _state.value.copy(
+                        phase = Phase.READY,
+                        message = "Dataset siap: ${result.numExamples} contoh, ${result.tokens.size} token" + if (result.truncated) " (dipotong)" else "",
+                        numTokens = result.tokens.size,
+                        numExamples = result.numExamples,
+                        vocabSize = result.tokenizer.vocabSize,
+                        totalParams = m.numParams,
+                        trainableParams = m.trainableParams,
+                        datasetName = uri.lastPathSegment?.substringAfterLast('/') ?: "dataset"
+                    )
+                } catch (e: Exception) {
+                    _state.value = _state.value.copy(phase = Phase.ERROR, message = "Gagal impor: ${e.message}")
+                }
+            }
+        }
+    }
+
+    fun startTraining(hp: HyperParams) {
+        val m = model ?: run { _state.value = _state.value.copy(phase = Phase.ERROR, message = "Belum ada model/dataset. Impor dataset dulu."); return }
+        if (corpus.size < m.cfg.seqLen * 2) { _state.value = _state.value.copy(phase = Phase.ERROR, message = "Corpus terlalu kecil."); return }
+        if (hp.numThreads > 0) NativeOps.nativeSetThreads(hp.numThreads) else NativeOps.nativeSetThreads(NativeOps.nativeCpuCores())
+        stopped = false; paused = false
+        job?.cancel()
+        job = scope.launch { trainLoop(m, hp) }
+    }
+
+    fun pause() { paused = true; _state.value = _state.value.copy(phase = Phase.PAUSED, message = "Dijeda.") }
+    fun resume() { paused = false; _state.value = _state.value.copy(phase = Phase.RUNNING, message = "Dilanjutkan.") }
+    fun stop() { stopped = true; paused = false }
+
+    private suspend fun trainLoop(m: GPT, hp: HyperParams) {
+        _state.value = _state.value.copy(phase = Phase.RUNNING, message = "Training dimulai…")
+        val tok = tokenizer!!
+        val S = m.cfg.seqLen
+        val B = hp.batchSize
+        val vocab = m.cfg.vocabSize
+        val T = B * S
+        val rng = Random(2026)
+
+        // Train / validation split (95/5)
+        val valSize = (corpus.size * 0.05).toInt().coerceAtLeast(S * 2)
+        val trainEnd = corpus.size - valSize
+
+        val pairs = m.trainablePairs()
+        val optimizer = AdamW(pairs, weightDecay = hp.weightDecay)
+        // Resume optimizer state if available
+        checkpointManager.loadOptimizerState(optimizer)?.let { (step, state) ->
+            optimizer.loadState(state, step)
+        }
+        val startStep = optimizer.step
+        val scheduler = CosineWarmupScheduler(hp.learningRate, warmupSteps = hp.warmupSteps, totalSteps = hp.maxSteps)
+
+        var bestVal = _state.value.bestValLoss
+        var patienceCount = 0
+        val history = _state.value.lossHistory.toMutableList()
+        val gradLogits = FloatArray(T * vocab)
+        val startMs = System.currentTimeMillis() - _state.value.elapsedMs
+        var tokensSeen = checkpointManager.loadMeta()?.tokensSeen ?: 0L
+        var step = startStep
+
+        while (step < hp.maxSteps && !stopped) {
+            while (paused && !stopped) delay(200)
+            if (stopped) break
+
+            val stepStart = System.currentTimeMillis()
+            // Sample random batch windows
+            val input = IntArray(T); val target = IntArray(T)
+            val span = S + 1
+            for (b in 0 until B) {
+                val start = rng.nextInt(trainEnd - span)
+                for (s in 0 until S) {
+                    input[b * S + s] = corpus[start + s]
+                    target[b * S + s] = corpus[start + s + 1]
+                }
+            }
+            m.zeroGrad()
+            val logits = m.forward(input, B, S, training = true)
+            val loss = crossEntropy(logits, target, vocab, gradLogits)
+            m.backward(gradLogits)
+
+            // Gradient clipping
+            val grads = pairs.map { it.second }
+            val gNorm = MathUtil.gradNorm(*grads.toTypedArray())
+            if (gNorm > hp.gradClip) {
+                val sc = hp.gradClip / gNorm
+                for (g in grads) MathUtil.scale(g, sc)
+            }
+            val lr = scheduler.lrAt(step)
+            optimizer.step(lr)
+            step = optimizer.step
+            tokensSeen += T.toLong()
+
+            val stepMs = (System.currentTimeMillis() - stepStart).coerceAtLeast(1)
+            val tps = T * 1000f / stepMs
+            val elapsed = System.currentTimeMillis() - startMs
+            val stepsLeft = hp.maxSteps - step
+            val eta = if (tps > 0) (stepsLeft * T * 1000L / tps.toLong()).coerceAtLeast(0L) else 0L
+
+            history += loss
+            if (history.size > 1000) history.removeAt(0)
+
+            var valLoss = _state.value.valLoss
+            if (step % hp.evalEvery == 0) {
+                valLoss = evaluate(m, vocab, trainEnd, valSize, B, S, gradLogits)
+                if (valLoss < bestVal - 1e-4f) { bestVal = valLoss; patienceCount = 0 }
+                else {
+                    patienceCount++
+                    if (patienceCount >= hp.patience) {
+                        _state.value = buildState(step, loss, valLoss, bestVal, lr, gNorm, tps, elapsed, eta, history, Phase.EARLY_STOPPED, "Early stop — val loss tidak membaik setelah $patienceCount evaluasi.")
+                        saveCheckpoint(m, optimizer, tok, step, bestVal, patienceCount, history, tokensSeen)
+                        return
+                    }
+                }
+            }
+
+            _state.value = buildState(step, loss, valLoss, bestVal, lr, gNorm, tps, elapsed, eta, history, Phase.RUNNING, "Training… step $step/${hp.maxSteps}")
+
+            if (step % hp.saveEvery == 0) {
+                saveCheckpoint(m, optimizer, tok, step, bestVal, patienceCount, history, tokensSeen)
+                _state.value = _state.value.copy(message = "Checkpoint disimpan (step $step). Bobot terus bertambah.")
+            }
+        }
+        saveCheckpoint(m, optimizer, tok, step, bestVal, patienceCount, history, tokensSeen)
+        _state.value = _state.value.copy(phase = if (stopped) Phase.READY else Phase.FINISHED, message = if (stopped) "Dihentikan pengguna. Checkpoint disimpan." else "Selesai! Checkpoint final disimpan.")
+    }
+
+    private fun buildState(step: Int, loss: Float, valLoss: Float, best: Float, lr: Float, gNorm: Float, tps: Float, elapsed: Long, eta: Long, hist: List<Float>, phase: Phase, msg: String) =
+        _state.value.copy(phase = phase, step = step, loss = loss, valLoss = valLoss, bestValLoss = best, lr = lr, gradNorm = gNorm, tokensPerSec = tps, elapsedMs = elapsed, etaMs = eta, lossHistory = hist.toList(), message = msg)
+
+    private fun evaluate(m: GPT, vocab: Int, trainEnd: Int, valSize: Int, B: Int, S: Int, gradLogits: FloatArray): Float {
+        val T = B * S
+        var total = 0f; var n = 0
+        val input = IntArray(T); val target = IntArray(T)
+        val batches = (valSize / (B * (S + 1))).coerceAtMost(4)
+        for (it in 0 until batches) {
+            val base = trainEnd + it * B * (S + 1)
+            for (b in 0 until B) {
+                val st = base + b * (S + 1)
+                if (st + S + 1 >= corpus.size) break
+                for (s in 0 until S) { input[b * S + s] = corpus[st + s]; target[b * S + s] = corpus[st + s + 1] }
+            }
+            val logits = m.forward(input, B, S, training = false)
+            total += crossEntropy(logits, target, vocab, gradLogits); n++
+        }
+        return if (n > 0) total / n else 0f
+    }
+
+    private fun saveCheckpoint(m: GPT, opt: AdamW, tok: Tokenizer, step: Int, best: Float, patience: Int, hist: List<Float>, tokensSeen: Long) {
+        checkpointManager.save(m, opt, tok, CheckpointManager.Meta(step, step, best, patience, hist.takeLast(500), tokensSeen))
+    }
+
+    fun clearCheckpoint() { checkpointManager.clear(); model = null; tokenizer = null; corpus = IntArray(0); _state.value = TrainState() }
+}
