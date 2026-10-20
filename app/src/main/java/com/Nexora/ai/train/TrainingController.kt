@@ -413,15 +413,15 @@ object TrainingController {
         var step = optimizer.step
         var scheduleStep = 0
         val remainingEpochs = hp.epochs - completedEpochs
-        val plannedStepsLong = step.toLong() + remainingEpochs.toLong() * stepsPerEpoch.toLong()
-        val plannedTotalSteps = plannedStepsLong.coerceAtMost(Int.MAX_VALUE.toLong()).toInt().coerceAtLeast(step + 1)
-        // Small datasets can have fewer than the requested warmup steps. Cap warmup
-        // to 10% of the remaining update count so LR does not stay near zero for all epochs.
-        val effectiveWarmup = minOf(hp.warmupSteps, ((plannedTotalSteps - step).coerceAtLeast(0) / 10))
+        val plannedRunSteps = (remainingEpochs.toLong() * stepsPerEpoch.toLong())
+            .coerceAtMost(Int.MAX_VALUE.toLong()).toInt().coerceAtLeast(1)
+        // Scheduler step is local to this training run, independent of AdamW's
+        // lifetime step count. Small datasets cap warmup to 10% of planned updates.
+        val effectiveWarmup = minOf(hp.warmupSteps, plannedRunSteps / 10)
         val scheduler = CosineWarmupScheduler(
             maxLR = hp.learningRate,
             warmupSteps = effectiveWarmup,
-            totalSteps = plannedTotalSteps
+            totalSteps = plannedRunSteps
         )
         var bestVal = metadata?.bestValLoss ?: Float.MAX_VALUE
         var patienceCount = metadata?.patienceCount ?: 0
