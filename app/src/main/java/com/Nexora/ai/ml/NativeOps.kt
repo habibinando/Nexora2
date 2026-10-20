@@ -2,6 +2,7 @@ package com.Nexora.ai.ml
 
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.abs
 
 /** JNI compute. Large GEMMs attempt GLES on one EGL-safe thread and fall back to CPU. */
 object NativeOps {
@@ -21,6 +22,9 @@ object NativeOps {
     private val gpuExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "Nexora-GLES").apply { isDaemon = true }
     }
+
+    // Accessed only from gpuExecutor; cached so validation runs once per process.
+    private var gpuValidationResult: Boolean? = null
 
     private fun <T> gpuCall(fallback: T, block: () -> T): T = try {
         gpuExecutor.submit<T> { block() }.get()
@@ -60,13 +64,72 @@ object NativeOps {
     @JvmStatic private external fun nativeGpuBench(M: Int, K: Int, N: Int, iter: Int): Double
     @JvmStatic private external fun nativeGpuMatMul(a: FloatArray, b: FloatArray, c: FloatArray, M: Int, K: Int, N: Int): Boolean
 
-    fun gpuInit(): Boolean = gpuCall(false) { nativeGpuInit() }
-    fun gpuInfo(): String = gpuCall("GPU tidak tersedia atau gagal diinisialisasi") { nativeGpuInfo() }
+    /**
+     * Runs exclusively on gpuExecutor. Shader compilation alone does not prove that
+     * the result is correct, so compare a non-tile-aligned GPU GEMM against the CPU.
+     * Dimensions 17x19x13 intentionally exercise the shader's edge-tile bounds.
+     */
+    private fun validateGpuOnExecutor(): Boolean {
+        gpuValidationResult?.let { return it }
+
+        val ready = try {
+            nativeGpuInit()
+        } catch (_: Exception) {
+            false
+        }
+        if (!ready) {
+            gpuValidationResult = false
+            return false
+        }
+
+        val m = 17
+        val k = 19
+        val n = 13
+        val a = FloatArray(m * k) { ((it % 13) - 6) * 0.125f }
+        val b = FloatArray(k * n) { ((it % 9) - 4) * 0.2f }
+        val expected = FloatArray(m * n)
+        val actual = FloatArray(m * n)
+
+        val passed = try {
+            // CPU reference uses the same row-major matrix contract as the shader.
+            jniMatMul(a, b, expected, m, k, n, false, false, 1f, 0f)
+            val executed = nativeGpuMatMul(a, b, actual, m, k, n)
+            if (!executed) {
+                false
+            } else {
+                var maxError = 0f
+                var maxReference = 0f
+                for (i in expected.indices) {
+                    maxError = maxOf(maxError, abs(expected[i] - actual[i]))
+                    maxReference = maxOf(maxReference, abs(expected[i]))
+                }
+                maxError <= 1e-3f * maxOf(1f, maxReference)
+            }
+        } catch (_: Exception) {
+            false
+        }
+
+        gpuValidationResult = passed
+        return passed
+    }
+
+    fun gpuInit(): Boolean = gpuCall(false) { validateGpuOnExecutor() }
+
+    fun gpuInfo(): String = gpuCall("GPU tidak tersedia atau gagal diinisialisasi") {
+        val passed = validateGpuOnExecutor()
+        val info = nativeGpuInfo()
+        if (passed) "$info | tes numerik GPU: LULUS"
+        else "$info | tes numerik GPU: GAGAL; GEMM besar dialihkan ke CPU"
+    }
+
     fun gpuBench(M: Int, K: Int, N: Int, iter: Int): Double =
-        gpuCall(-1.0) { nativeGpuBench(M, K, N, iter) }
+        gpuCall(-1.0) {
+            if (validateGpuOnExecutor()) nativeGpuBench(M, K, N, iter) else -1.0
+        }
 
     fun computeStats() = ComputeStats(cpuGemmCalls.get(), gpuGemmCalls.get(), gpuFallbacks.get())
 
+    /** Clear counters so displayed numbers describe only the next measured phase. */
     fun resetComputeStats() {
         cpuGemmCalls.set(0)
         gpuGemmCalls.set(0)
@@ -78,12 +141,19 @@ object NativeOps {
         a: FloatArray, b: FloatArray, M: Int, K: Int, N: Int,
         transA: Boolean = false, transB: Boolean = false
     ): FloatArray {
+        require(M > 0 && K > 0 && N > 0) { "Matrix dimensions must be positive" }
+        require(a.size >= (if (transA) K * M else M * K)) { "Matrix A buffer is too small" }
+        require(b.size >= (if (transB) N * K else K * N)) { "Matrix B buffer is too small" }
+
         val c = FloatArray(M * N)
         val work = M.toLong() * K.toLong() * N.toLong()
         if (work >= 8_000_000L) {
             val gpuA = if (transA) transposeRowMajor(a, K, M) else a
             val gpuB = if (transB) transposeRowMajor(b, N, K) else b
-            if (gpuCall(false) { nativeGpuMatMul(gpuA, gpuB, c, M, K, N) }) {
+            val gpuOk = gpuCall(false) {
+                validateGpuOnExecutor() && nativeGpuMatMul(gpuA, gpuB, c, M, K, N)
+            }
+            if (gpuOk) {
                 gpuGemmCalls.incrementAndGet()
                 return c
             }
