@@ -125,7 +125,24 @@ object NativeOps {
                 maxError = maxOf(maxError, abs(expected[i] - actual[i]))
                 maxReference = maxOf(maxReference, abs(expected[i]))
             }
-            return maxError <= 1e-3f * maxOf(1f, maxReference)
+            val ordinaryPasses = maxError <= 1e-3f * maxOf(1f, maxReference)
+            if (!ordinaryPasses) return false
+
+            // Validate the accumulation branch used by weight gradients too.
+            // Beta=1 must preserve and add to a non-zero existing destination.
+            val seed = FloatArray(m * n) { ((it % 7) - 3) * 0.03125f }
+            val expectedAccumulated = seed.copyOf()
+            val actualAccumulated = seed.copyOf()
+            jniMatMul(inputA, inputB, expectedAccumulated, m, k, n, transA, transB, 1f, 1f)
+            if (!nativeVulkanMatMul(gpuA, gpuB, actualAccumulated, m, k, n, true)) return false
+
+            var accumulatedError = 0f
+            var accumulatedReference = 0f
+            for (i in expectedAccumulated.indices) {
+                accumulatedError = maxOf(accumulatedError, abs(expectedAccumulated[i] - actualAccumulated[i]))
+                accumulatedReference = maxOf(accumulatedReference, abs(expectedAccumulated[i]))
+            }
+            return accumulatedError <= 1e-3f * maxOf(1f, accumulatedReference)
         }
 
         val passed = try {
