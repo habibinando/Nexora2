@@ -88,6 +88,11 @@ class Tokenizer private constructor(
 
         fun splitToPieces(text: String): List<String> = PIECE_REGEX.findAll(text).map { it.value }.toList()
 
+        /** Visit pieces without allocating a temporary list for each dataset row. */
+        fun forEachPiece(text: String, emit: (String) -> Unit) {
+            for (match in PIECE_REGEX.findAll(text)) emit(match.value)
+        }
+
         /** Build vocab from frequency map; keeps top (vocabSize - SPECIAL - BYTES) words. */
         fun build(freq: Map<String, Int>, vocabSize: Int): Tokenizer {
             val wordSlots = vocabSize - SPECIAL - BYTES
