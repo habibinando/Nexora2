@@ -11,8 +11,8 @@ checkpoint periodik sehingga **bobot terus bertambah** antar sesi.
 - AGP 9.4.0
 - NDK r30 LTS (`ndkVersion "30.0.16248370"`)
 - Native CPU kernels: ARM NEON + multithreaded GEMM
-- GPU compute: Vulkan 1.0 + precompiled SPIR-V; no  backend
-- CMake 3.22.1, C++20, NEON + pthread, OpenGL ES 3.1 compute
+- GPU compute: Vulkan 1.0 + precompiled SPIR-V; no OpenGL ES compute backend
+- CMake 3.22.1, C++20, ARM NEON + native thread pool, Vulkan loader
 - compileSdk / targetSdk 37, minSdk 31, `largeHeap="true"`
 
 ## Cara build
@@ -20,7 +20,7 @@ checkpoint periodik sehingga **bobot terus bertambah** antar sesi.
    Gradle 9.8.1 + dependensi secara otomatis.
 2. Pastikan SDK Platform 37 (`android.jar`), NDK r30, CMake 3.22.1, dan Vulkan shader support terpasang. Shader `app/src/main/shaders/matmul.comp` dikompilasi Gradle menjadi `assets/shaders/matmul.comp.spv`.
 3. `./gradlew :app:assembleDebug` (atau Build > Make Project).
-4. Instal di perangkat Android 12+ (minSdk 26). GPU compute opsional.
+4. Instal di perangkat Android 12+ (minSdk 31). Vulkan opsional pada runtime; backend CPU tetap tersedia.
 
 ## Fitur nyata (tidak ada mock)
 | Fitur | Lokasi kode |
@@ -37,7 +37,7 @@ checkpoint periodik sehingga **bobot terus bertambah** antar sesi.
 | Chat dengan model hasil latihan (generasi token-per-token, top-k sampling) | `ml/Inference.kt`, `ui/screens/ChatScreen.kt` |
 | Benchmark: CPU GFLOPS (NEON+thread), Vulkan compute GEMM, mini-training throughput, CPU/GPU counters, info perangkat & RAM | `benchmark/BenchmarkRunner.kt`, `cpp/vulkan_compute.cpp`, `main/shaders/matmul.comp` |
 | Maksimalkan CPU: thread pool sejumlah core, NEON intrinsik, `largeHeap=true` | `cpp/native.cpp`, `AndroidManifest.xml` |
-| GPU compute: OpenGL ES 3.1 compute shader (tiled shared memory), fallback CPU | `cpp/gles_compute.cpp` |
+| GPU compute: Vulkan compute shader tiled GEMM + tes akurasi, fallback CPU | `cpp/vulkan_compute.cpp`, `main/shaders/matmul.comp` |
 | Foreground service agar training berjalan saat layar mati | `train/TrainingService.kt` |
 | Loading screen animasi + SplashScreen API | `ui/MainActivity.kt` |
 | UI modern 2026: gelap OLED, glassmorphism, aksen teal-cyan, Material 3, Compose | `ui/theme/Theme.kt`, `ui/components/Components.kt` |
@@ -57,7 +57,7 @@ Minimum Android SDK is now API 31 (Android 12). Vulkan is an optional device fea
 ## Referensi teknis dan validasi GPU
 
 - [Android NDK r30 changelog](https://github.com/android/ndk/wiki/Changelog-r30): r30 memperbarui Clang dan sysroot hingga API 37. Toolchain ini membantu membangun kode native; pemasangan NDK sendiri tidak membuat training otomatis berjalan di GPU.
-- [Android NDK shader compilers](https://developer.android.com/ndk/guides/graphics/shader-compilers): halaman ini membahas shader **Vulkan** yang menggunakan SPIR-V. Nexora saat ini memakai **OpenGL ES 3.1 compute**, yang mengirim sumber GLSL ke driver saat runtime; karena itu Shaderc/SPIR-V tidak ditambahkan tanpa migrasi backend Vulkan yang sesungguhnya.
+- [Android NDK shader compilers](https://developer.android.com/ndk/guides/graphics/shader-compilers): halaman ini membahas shader **Vulkan** yang menggunakan SPIR-V. Nexora memakai jalur tersebut dengan shader SPIR-V yang dikompilasi pada saat build, bukan shader OpenGL ES yang dikompilasi driver saat runtime.
 - [PyTorch Android model preparation recipe](https://pytorch-cn.com/tutorials/recipes/model_preparation_android.html): contoh tersebut menyiapkan model TorchScript/quantized untuk inferensi. Itu bukan pengganti loop backpropagation/optimizer Nexora, jadi tidak dianggap sebagai akselerasi training.
   Dokumentasi PyTorch yang lebih baru juga menyatakan PyTorch Mobile tidak lagi aktif didukung dan menyarankan melihat [ExecuTorch](https://docs.pytorch.org/tutorials/recipes/mobile_interpreter.html). Mengganti runtime tetap perlu jalur model yang cocok; itu bukan pengganti otomatis untuk backpropagation dan optimizer custom Nexora.
 - Sebelum GEMM GPU dipakai, Nexora membandingkan hasilnya dengan GEMM CPU untuk matriks 17×19 dikali 19×13. Ukuran non-kelipatan 16 membantu menguji batas tile shader. Bila inisialisasi atau hasil tes gagal, operasi GEMM dialihkan ke CPU.
