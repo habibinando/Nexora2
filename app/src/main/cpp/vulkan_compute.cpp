@@ -131,6 +131,27 @@ struct VulkanState {
 
     bool init(AAssetManager* assets) {
         if (ok) return true;
+
+        // Failed Vulkan initialization can leave an instance/device or partially
+        // created pipeline behind. Clean that state before retrying and preserve
+        // the diagnostic so CPU fallback remains safe and understandable.
+        if (device != VK_NULL_HANDLE || instance != VK_NULL_HANDLE) {
+            const std::string previousError = error;
+            destroy();
+            error = previousError;
+        }
+        const bool initialized = initInternal(assets);
+        if (initialized) return true;
+
+        const std::string previousError = error.empty()
+            ? "Inisialisasi Vulkan gagal tanpa diagnostik"
+            : error;
+        destroy();
+        error = previousError;
+        return false;
+    }
+
+    bool initInternal(AAssetManager* assets) {
         VkApplicationInfo app{};
         app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
         app.pApplicationName = "Nexora";
@@ -425,6 +446,10 @@ struct VulkanState {
         const uint64_t nb = static_cast<uint64_t>(K) * static_cast<uint64_t>(N) * sizeof(float);
         const uint64_t nc = static_cast<uint64_t>(M) * static_cast<uint64_t>(N) * sizeof(float);
         if (na > SIZE_MAX || nb > SIZE_MAX || nc > SIZE_MAX) return false;
+        // Vulkan storage-buffer descriptors cannot address more than this device limit.
+        // Decline the GPU path before allocating anything; NativeOps will use CPU GEMM.
+        const VkDeviceSize maxRange = properties.limits.maxStorageBufferRange;
+        if (na > maxRange || nb > maxRange || nc > maxRange) return false;
         if (!ensureBuffer(a, na) || !ensureBuffer(b, nb) || !ensureBuffer(c, nc)) return false;
 
         std::memcpy(a.mapped, A, static_cast<size_t>(na));
