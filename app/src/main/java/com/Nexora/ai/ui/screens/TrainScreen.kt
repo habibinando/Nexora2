@@ -1,5 +1,13 @@
 package com.Nexora.ai.ui.screens
 
+import android.Manifest
+import android.app.NotificationManager
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -18,16 +26,29 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.Nexora.ai.ml.NativeOps
 import com.Nexora.ai.train.Phase
 import com.Nexora.ai.train.TrainingController
+import com.Nexora.ai.train.TrainingService
 import com.Nexora.ai.ui.AppSettings
 import com.Nexora.ai.ui.components.GlassCard
 import com.Nexora.ai.ui.components.GradientLabel
@@ -47,13 +68,58 @@ private fun fmtMs(ms: Long): String {
     return "%02d:%02d:%02d".format(seconds / 3600, (seconds % 3600) / 60, seconds % 60)
 }
 
+private fun notificationsAllowed(context: Context): Boolean {
+    if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) return false
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+    ) return false
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        val channel = context.getSystemService(NotificationManager::class.java)
+            ?.getNotificationChannel(TrainingService.CHANNEL_ID)
+        if (channel?.importance == NotificationManager.IMPORTANCE_NONE) return false
+    }
+    return true
+}
+
+private fun openNotificationSettings(context: Context) {
+    val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+            .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+    } else {
+        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))
+    }
+    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    context.startActivity(intent)
+}
+
 private fun fmtOperationMs(ms: Long): String =
     if (ms < 1000L) "$ms ms" else "%.2f dtk".format(Locale.US, ms / 1000.0)
 
 @Composable
 fun TrainScreen() {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val state by TrainingController.state.collectAsState()
     val hp by AppSettings.hp.collectAsState()
+    var notificationsEnabled by remember { mutableStateOf(notificationsAllowed(context)) }
+    var notificationMessage by remember { mutableStateOf<String?>(null) }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        notificationsEnabled = notificationsAllowed(context)
+        notificationMessage = if (granted && notificationsEnabled) {
+            "Izin notifikasi aktif. Pemberitahuan training akan tampil selama layanan training berjalan."
+        } else {
+            "Izin belum aktif atau channel notifikasi dinonaktifkan. Buka pengaturan notifikasi aplikasi lalu aktifkan Nexora dan channel Training."
+        }
+    }
+    DisposableEffect(lifecycleOwner, context) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) notificationsEnabled = notificationsAllowed(context)
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     val stats = NativeOps.computeStats()
     val running = state.phase == Phase.RUNNING
     val paused = state.phase == Phase.PAUSED
@@ -74,6 +140,39 @@ fun TrainScreen() {
     ) {
         GradientLabel("Training")
         Text("Pantau update bobot, loss, validasi, dan operasi komputasi yang benar-benar berjalan.", color = NexoraMuted, fontSize = 13.sp)
+
+        SectionTitle("Izin notifikasi training")
+        GlassCard {
+            Text(
+                if (notificationsEnabled) {
+                    "Notifikasi aplikasi aktif. Nexora akan memperbarui pemberitahuan saat training berjalan."
+                } else {
+                    "Notifikasi belum diizinkan atau channel Training dimatikan. Pada Android 13+, izin runtime harus disetujui; jika ditolak, notifikasi training mungkin tidak muncul di panel notifikasi."
+                },
+                color = if (notificationsEnabled) NexoraPrimary else NexoraMuted,
+                fontSize = 12.sp
+            )
+            notificationMessage?.let { Text(it, color = NexoraMuted, fontSize = 11.sp) }
+            if (!notificationsEnabled) {
+                val runtimePermissionMissing = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                Button(
+                    onClick = {
+                        if (runtimePermissionMissing) {
+                            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        } else {
+                            openNotificationSettings(context)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = NexoraPrimary, contentColor = Color.Black)
+                ) { Text(if (runtimePermissionMissing) "Minta izin notifikasi" else "Periksa pengaturan notifikasi") }
+            }
+            OutlinedButton(
+                onClick = { openNotificationSettings(context) },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("Buka pengaturan notifikasi aplikasi") }
+        }
 
         GlassCard {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
