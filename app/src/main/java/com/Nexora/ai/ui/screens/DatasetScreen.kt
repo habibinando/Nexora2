@@ -50,12 +50,21 @@ fun DatasetScreen() {
         Text("Impor file .jsonl / .csv / .txt (maks 500 MB). Vocab tokenizer dibangun otomatis dari dataset (maks ${cfg.vocabSize} token).",
             color = NexoraMuted, fontSize = 13.sp)
 
+        val trainingActive = s.phase == Phase.RUNNING || s.phase == Phase.PAUSED
         Button(
             onClick = { launcher.launch(arrayOf("*/*")) },
-            enabled = s.phase != Phase.IMPORTING,
+            enabled = s.phase != Phase.IMPORTING && !trainingActive,
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.buttonColors(containerColor = NexoraPrimary, contentColor = androidx.compose.ui.graphics.Color.Black)
         ) { Text("Pilih file dataset", fontWeight = FontWeight.Bold) }
+
+        if (trainingActive) {
+            Text(
+                "Impor dataset dinonaktifkan selama training aktif atau dijeda agar model dan corpus tidak berubah di tengah step.",
+                color = NexoraMuted,
+                fontSize = 12.sp
+            )
+        }
 
         if (s.phase == Phase.IMPORTING) {
             LinearProgressIndicator(progress = { s.importProgress }, modifier = Modifier.fillMaxWidth())
