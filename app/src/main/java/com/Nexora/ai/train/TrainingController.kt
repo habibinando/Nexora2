@@ -27,6 +27,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.random.Random
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.security.MessageDigest
 
 enum class Phase { IDLE, IMPORTING, READY, RUNNING, PAUSED, EARLY_STOPPED, FINISHED, ERROR }
 
@@ -96,6 +99,7 @@ object TrainingController {
     @Volatile private var paused = false
     @Volatile private var stopped = false
     @Volatile private var resumeCheckpointCompatible = false
+    @Volatile private var activeDatasetFingerprint: String = ""
 
     private fun estimateModelParams(cfg: ModelConfig): Long {
         val d = cfg.dModel.toLong()
@@ -170,6 +174,7 @@ object TrainingController {
                     model = restoredModel
                     tokenizer = checkpointManager.loadTokenizer()
                     val meta = checkpointManager.loadMeta()
+                    activeDatasetFingerprint = meta?.datasetFingerprint.orEmpty()
                     _state.value = _state.value.copy(
                         phase = Phase.READY,
                         step = meta?.step ?: 0,
@@ -244,13 +249,28 @@ object TrainingController {
                     if (memoryWarning != null) throw IllegalArgumentException(memoryWarning)
                     tokenizer = result.tokenizer
                     corpus = result.tokens
+                    val datasetFingerprint = fingerprintTokens(result.tokens)
                     var m = GPT(actualCfg)
                     val checkpointCompatible = canReuseCheckpoint &&
                         savedCfg == actualCfg && checkpointManager.loadTensors(m)
                     if (canReuseCheckpoint && !checkpointCompatible) m = GPT(actualCfg)
-                    resumeCheckpointCompatible = checkpointCompatible
+                    val savedMeta = if (checkpointCompatible) checkpointManager.loadMeta() else null
+                    val sameTrainingDataset = checkpointCompatible &&
+                        !savedMeta?.datasetFingerprint.isNullOrBlank() &&
+                        savedMeta?.datasetFingerprint == datasetFingerprint
+
+                    // Compatible model weights stay loaded when the dataset changes.
+                    // Optimizer moments, epoch count and early-stop history are reused only
+                    // when the exact token corpus matches; otherwise a new run is allowed.
+                    activeDatasetFingerprint = datasetFingerprint
+                    resumeCheckpointCompatible = checkpointCompatible && sameTrainingDataset
+                    val meta = if (resumeCheckpointCompatible) savedMeta else null
                     model = m
-                    val meta = if (checkpointCompatible) checkpointManager.loadMeta() else null
+                    val datasetNote = when {
+                        sameTrainingDataset -> " Checkpoint cocok: bobot dan progres epoch dapat dilanjutkan."
+                        checkpointCompatible -> " Dataset berbeda/metadata lama: bobot kompatibel dipakai, penghitung epoch dan optimizer direset."
+                        else -> ""
+                    }
                     _state.value = _state.value.copy(
                         phase = Phase.READY,
                         step = meta?.step ?: 0,
@@ -265,8 +285,8 @@ object TrainingController {
                         elapsedMs = 0L,
                         etaMs = 0L,
                         lossHistory = meta?.lossHistory ?: emptyList(),
-                        message = "Dataset siap: ${result.numExamples} contoh, ${result.tokens.size} token" +
-                            if (result.truncated) " (dipotong)" else "",
+                        message = "Dataset siap: \${result.numExamples} contoh, \${result.tokens.size} token" +
+                            (if (result.truncated) " (dipotong)" else "") + datasetNote,
                         numTokens = result.tokens.size,
                         numExamples = result.numExamples,
                         vocabSize = result.tokenizer.vocabSize,
@@ -710,9 +730,28 @@ object TrainingController {
     ) {
         checkpointManager.save(
             m, opt, tok,
-            CheckpointManager.Meta(step, completedEpochs, best, patience, hist.takeLast(500), tokensSeen)
+            CheckpointManager.Meta(
+                step, completedEpochs, best, patience, hist.takeLast(500), tokensSeen,
+                activeDatasetFingerprint
+            )
         )
         resumeCheckpointCompatible = true
+    }
+
+
+    /** Stable SHA-256 identity for the exact token sequence used by this run. */
+    private fun fingerprintTokens(tokens: IntArray): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val chunk = ByteBuffer.allocate(64 * 1024).order(ByteOrder.LITTLE_ENDIAN)
+        for (token in tokens) {
+            if (chunk.remaining() < Int.SIZE_BYTES) {
+                digest.update(chunk.array(), 0, chunk.position())
+                chunk.clear()
+            }
+            chunk.putInt(token)
+        }
+        if (chunk.position() > 0) digest.update(chunk.array(), 0, chunk.position())
+        return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
     }
 
     fun clearCheckpoint() {
@@ -727,6 +766,7 @@ object TrainingController {
         model = null
         tokenizer = null
         corpus = IntArray(0)
+        activeDatasetFingerprint = ""
         _state.value = TrainState()
     }
 }

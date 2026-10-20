@@ -20,7 +20,7 @@ class CheckpointManager(private val dir: File) {
 
     companion object {
         private const val META_MAGIC = 0x4E584D31
-        private const val META_VERSION = 1
+        private const val META_VERSION = 2
     }
 
     init {
@@ -40,7 +40,8 @@ class CheckpointManager(private val dir: File) {
     data class Meta(
         val step: Int, val epoch: Int, val bestValLoss: Float,
         val patienceCount: Int, val lossHistory: List<Float>,
-        val tokensSeen: Long
+        val tokensSeen: Long,
+        val datasetFingerprint: String = ""
     )
 
     fun save(model: GPT, optimizer: AdamW, tokenizer: Tokenizer, meta: Meta) {
@@ -85,6 +86,7 @@ class CheckpointManager(private val dir: File) {
                 output.writeInt(META_MAGIC); output.writeInt(META_VERSION)
                 output.writeInt(meta.step); output.writeInt(meta.epoch); output.writeFloat(meta.bestValLoss)
                 output.writeInt(meta.patienceCount); output.writeLong(meta.tokensSeen)
+                output.writeUTF(meta.datasetFingerprint)
                 output.writeInt(meta.lossHistory.size)
                 for (loss in meta.lossHistory) output.writeFloat(loss)
             }
@@ -163,21 +165,25 @@ class CheckpointManager(private val dir: File) {
         DataInputStream(BufferedInputStream(FileInputStream(File(dir, "meta.bin")), 1 shl 20)).use { input ->
             val marker = input.readInt()
             val versioned = marker == META_MAGIC
-            if (versioned) require(input.readInt() == META_VERSION) { "Unsupported checkpoint metadata version" }
+            val version = if (versioned) input.readInt() else 0
+            require(!versioned || version in 1..META_VERSION) { "Unsupported checkpoint metadata version" }
             val step = if (versioned) input.readInt() else marker
             val storedEpoch = input.readInt()
-            // Migrate metadata from the earlier Nexora2 build: it wrote step into both fields.
-            val epoch = if (!versioned && step > 0 && storedEpoch == step) 0 else storedEpoch
             val best = input.readFloat()
             val patience = input.readInt()
             val tokens = input.readLong()
+            val fingerprint = if (versioned && version >= 2) input.readUTF() else ""
             val count = input.readInt()
+
+            // Very old checkpoints wrote optimizer step into both step and epoch.
+            // Their epoch count is unknowable, so resume weights but restart the epoch schedule.
+            val epoch = if (!versioned && step > 0 && storedEpoch == step) 0 else storedEpoch
             require(step >= 0 && epoch >= 0 && patience >= 0 && tokens >= 0L)
             require(count in 0..500) { "Invalid loss history size" }
             val history = List(count) { input.readFloat().also { loss -> require(loss.isFinite()) } }
             require(best.isFinite() || best == Float.MAX_VALUE)
             require(input.read() == -1) { "Unexpected trailing checkpoint metadata" }
-            Meta(step, epoch, best, patience, history, tokens)
+            Meta(step, epoch, best, patience, history, tokens, fingerprint)
         }
     } catch (_: Exception) { null }
 

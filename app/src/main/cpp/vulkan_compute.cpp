@@ -12,6 +12,8 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <sstream>
+#include <iomanip>
 #include <vector>
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "NexoraVulkan", __VA_ARGS__)
@@ -24,6 +26,23 @@ struct HostBuffer {
     VkDeviceSize capacity = 0;
     bool coherent = false;
 };
+
+
+static std::string vkVersionString(uint32_t version) {
+    return std::to_string(VK_VERSION_MAJOR(version)) + "." +
+           std::to_string(VK_VERSION_MINOR(version)) + "." +
+           std::to_string(VK_VERSION_PATCH(version));
+}
+
+static const char* vkDeviceTypeString(VkPhysicalDeviceType type) {
+    switch (type) {
+        case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return "integrated GPU";
+        case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return "discrete GPU";
+        case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return "virtual GPU";
+        case VK_PHYSICAL_DEVICE_TYPE_CPU: return "CPU Vulkan implementation";
+        default: return "other";
+    }
+}
 
 struct VulkanState {
     bool ok = false;
@@ -283,8 +302,21 @@ struct VulkanState {
         result = vkCreateFence(device, &fenceInfo, nullptr, &fence);
         if (result != VK_SUCCESS) return fail("vkCreateFence", result);
 
-        info = std::string("Vulkan 1.0 | ") + properties.deviceName +
-               " | max SSBO " + std::to_string(properties.limits.maxStorageBufferRange / (1024 * 1024)) + " MiB";
+        uint64_t deviceLocalHeapBytes = 0;
+        for (uint32_t i = 0; i < memoryProperties.memoryHeapCount; ++i) {
+            if ((memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) {
+                deviceLocalHeapBytes += memoryProperties.memoryHeaps[i].size;
+            }
+        }
+        std::ostringstream driverHex;
+        driverHex << std::hex << properties.driverVersion;
+        info = std::string("Vulkan device API ") + vkVersionString(properties.apiVersion) +
+               " | GPU: " + properties.deviceName +
+               " | tipe: " + vkDeviceTypeString(properties.deviceType) +
+               " | driver raw=0x" + driverHex.str() +
+               " | memori device-local " + std::to_string(deviceLocalHeapBytes / (1024 * 1024)) + " MiB" +
+               " | max SSBO " + std::to_string(properties.limits.maxStorageBufferRange / (1024 * 1024)) + " MiB" +
+               " | aplikasi memakai fitur komputasi Vulkan dasar (kompatibel 1.0)";
         ok = true;
         LOGI("Initialized: %s", info.c_str());
         return true;
@@ -472,7 +504,8 @@ Java_com_Nexora_ai_ml_NativeOps_nativeVulkanInit(JNIEnv* env, jclass, jobject as
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_Nexora_ai_ml_NativeOps_nativeVulkanInfo(JNIEnv* env, jclass) {
     auto* s = state();
-    const std::string msg = s->ok ? s->info : (s->error.empty() ? "Vulkan compute tidak tersedia" : s->error);
+    std::string msg = s->ok ? s->info : (s->error.empty() ? "Vulkan compute tidak tersedia" : s->error);
+    if (s->ok && !s->error.empty()) msg += " | error operasi terakhir: " + s->error;
     return env->NewStringUTF(msg.c_str());
 }
 
