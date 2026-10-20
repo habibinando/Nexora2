@@ -33,7 +33,9 @@ enum class Phase { IDLE, IMPORTING, READY, RUNNING, PAUSED, EARLY_STOPPED, FINIS
 data class HyperParams(
     val learningRate: Float = 3e-4f,
     val batchSize: Int = 4,
+    val epochs: Int = 3,
     val warmupSteps: Int = 100,
+    /** Legacy preference retained for compatibility; the training loop no longer stops by maxSteps. */
     val maxSteps: Int = 5000,
     val saveEvery: Int = 200,
     val evalEvery: Int = 100,
@@ -46,7 +48,12 @@ data class HyperParams(
 data class TrainState(
     val phase: Phase = Phase.IDLE,
     val step: Int = 0,
+    /** Number of fully completed epochs, persisted to the checkpoint. */
     val epoch: Int = 0,
+    /** 1-based epoch currently being processed; zero means no active epoch. */
+    val currentEpoch: Int = 0,
+    val batchInEpoch: Int = 0,
+    val batchesInEpoch: Int = 0,
     val loss: Float = Float.NaN,
     val valLoss: Float = Float.NaN,
     val bestValLoss: Float = Float.MAX_VALUE,
@@ -166,6 +173,7 @@ object TrainingController {
                         phase = Phase.READY,
                         step = meta?.step ?: 0,
                         epoch = meta?.epoch ?: 0,
+                        currentEpoch = (meta?.epoch ?: 0) + 1,
                         bestValLoss = meta?.bestValLoss ?: Float.MAX_VALUE,
                         lossHistory = meta?.lossHistory ?: emptyList(),
                         vocabSize = cfg.vocabSize,
@@ -245,6 +253,9 @@ object TrainingController {
                         phase = Phase.READY,
                         step = meta?.step ?: 0,
                         epoch = meta?.epoch ?: 0,
+                        currentEpoch = (meta?.epoch ?: 0) + 1,
+                        batchInEpoch = 0,
+                        batchesInEpoch = 0,
                         loss = Float.NaN,
                         valLoss = Float.NaN,
                         bestValLoss = meta?.bestValLoss ?: Float.MAX_VALUE,
@@ -277,37 +288,46 @@ object TrainingController {
             _state.value = _state.value.copy(message = "Training baru tidak dapat dimulai saat training atau impor lain sedang aktif.")
             return
         }
-        val m = model ?: run { _state.value = _state.value.copy(phase = Phase.ERROR, message = "Belum ada model/dataset. Impor dataset dulu."); return }
-        val span = m.cfg.seqLen + 1
-        val requiredTokens = span.toLong() * (hp.batchSize + 1L)
-        if (corpus.size.toLong() < requiredTokens) {
+        val m = model ?: run {
+            _state.value = _state.value.copy(phase = Phase.ERROR, message = "Belum ada model/dataset. Impor dataset dulu.")
+            return
+        }
+        val minimumTokens = 2L * (m.cfg.seqLen + 1L)
+        if (corpus.size.toLong() < minimumTokens) {
             _state.value = _state.value.copy(
                 phase = Phase.ERROR,
-                message = "Dataset terlalu kecil untuk sequence ${m.cfg.seqLen} dan batch ${hp.batchSize}; diperlukan minimal $requiredTokens token."
+                message = "Dataset memerlukan minimal $minimumTokens token agar tersedia data training dan validasi."
             )
             return
         }
-        // Scope backend counters to this training run, not an earlier benchmark.
+
         NativeOps.resetComputeStats()
-        if (hp.numThreads > 0) NativeOps.nativeSetThreads(hp.numThreads) else NativeOps.nativeSetThreads(NativeOps.nativeCpuCores())
+        if (hp.numThreads > 0) NativeOps.nativeSetThreads(hp.numThreads)
+        else NativeOps.nativeSetThreads(NativeOps.nativeCpuCores())
         stopped = false
         paused = false
         job?.cancel()
-        _state.value = _state.value.copy(phase = Phase.RUNNING, message = "Menyiapkan training lokal…")
+        _state.value = _state.value.copy(
+            phase = Phase.RUNNING,
+            currentEpoch = (_state.value.epoch + 1).coerceAtMost(hp.epochs),
+            batchInEpoch = 0,
+            batchesInEpoch = 0,
+            message = "Menyiapkan training per epoch…"
+        )
         job = scope.launch {
             try {
                 trainLoop(m, hp)
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: OutOfMemoryError) {
+            } catch (_: OutOfMemoryError) {
                 _state.value = _state.value.copy(
                     phase = Phase.ERROR,
-                    message = "Memori tidak cukup. Kurangi batch size, context, dimensi model, atau jumlah layer."
+                    message = "RAM tidak cukup saat training. Kurangi batch size, context, dimensi model, atau jumlah layer."
                 )
             } catch (e: Exception) {
                 _state.value = _state.value.copy(
                     phase = Phase.ERROR,
-                    message = "Training gagal: ${e.message ?: e::class.java.simpleName}"
+                    message = "Training gagal: \${e.message ?: e::class.java.simpleName}"
                 )
             }
         }
@@ -315,189 +335,375 @@ object TrainingController {
 
     fun pause() {
         paused = true
-        _state.value = _state.value.copy(phase = Phase.PAUSED, message = "Jeda diminta; step aktif diselesaikan terlebih dahulu…")
+        _state.value = _state.value.copy(phase = Phase.PAUSED, message = "Jeda diminta; batch aktif diselesaikan terlebih dahulu…")
     }
+
     fun resume() {
         paused = false
         _state.value = _state.value.copy(phase = Phase.RUNNING, message = "Training dilanjutkan.")
     }
+
     fun stop() {
         stopped = true
         paused = false
-        _state.value = _state.value.copy(message = "Stop diminta; menyelesaikan step aktif lalu menyimpan checkpoint…")
+        _state.value = _state.value.copy(message = "Stop diminta; batch aktif diselesaikan lalu checkpoint disimpan…")
     }
 
+    /**
+     * One epoch is one pass through shuffled fixed-length windows from the training
+     * portion of the token corpus. The final partial batch is processed instead of
+     * silently dropping examples. Loss/gradient/optimizer work remains the real model loop.
+     */
     private suspend fun trainLoop(m: GPT, hp: HyperParams) {
-        _state.value = _state.value.copy(phase = Phase.RUNNING, message = "Training dimulai…")
-        val tok = tokenizer!!
+        val tok = tokenizer ?: throw IllegalStateException("Tokenizer belum tersedia.")
         val S = m.cfg.seqLen
-        val B = hp.batchSize
+        val B = hp.batchSize.coerceIn(1, 16)
         val vocab = m.cfg.vocabSize
-        val T = B * S
-        val rng = Random(2026)
 
-        // Train / validation split (95/5)
-        val span = S + 1
-        val valSize = maxOf((corpus.size * 0.05).toInt(), B * span)
+        val valSize = maxOf((corpus.size * 0.05).toInt(), S + 1)
+            .coerceAtMost(corpus.size - (S + 1))
         val trainEnd = corpus.size - valSize
-        if (trainEnd < span || valSize < B * span) {
-            _state.value = _state.value.copy(phase = Phase.ERROR, message = "Dataset tidak cukup untuk train/validation split.")
+        if (trainEnd < S + 1 || valSize < S + 1) {
+            _state.value = _state.value.copy(phase = Phase.ERROR, message = "Dataset tidak cukup untuk memisahkan training dan validasi.")
             return
         }
 
+        // A window contains S input tokens and the shifted S target tokens.
+        // Stride S gives a bounded, repeatable pass instead of sampling forever with replacement.
+        val windowCount = ((trainEnd - 1) / S).coerceAtLeast(0)
+        if (windowCount <= 0) {
+            _state.value = _state.value.copy(phase = Phase.ERROR, message = "Dataset training tidak cukup untuk satu sequence.")
+            return
+        }
+        val stepsPerEpoch = (windowCount + B - 1) / B
+
         val pairs = m.trainablePairs()
         val optimizer = AdamW(pairs, weightDecay = hp.weightDecay)
-        // Resume optimizer state if available
+        var metadata = if (resumeCheckpointCompatible) checkpointManager.loadMeta() else null
         if (resumeCheckpointCompatible) {
-            checkpointManager.loadOptimizerState(optimizer)?.let { (step, state) ->
-                optimizer.loadState(state, step)
+            val savedOptimizer = checkpointManager.loadOptimizerState(optimizer)
+            if (savedOptimizer != null) {
+                optimizer.loadState(savedOptimizer.second, savedOptimizer.first)
+            } else {
+                // A weights-only checkpoint is still usable, but stale epoch/optimizer
+                // counters must not make the app skip the requested training.
+                resumeCheckpointCompatible = false
+                metadata = null
             }
         }
-        val startStep = optimizer.step
-        val scheduler = CosineWarmupScheduler(hp.learningRate, warmupSteps = hp.warmupSteps, totalSteps = hp.maxSteps)
 
-        var bestVal = if (resumeCheckpointCompatible) _state.value.bestValLoss else Float.MAX_VALUE
-        var patienceCount = if (resumeCheckpointCompatible) checkpointManager.loadMeta()?.patienceCount ?: 0 else 0
-        val history = if (resumeCheckpointCompatible) _state.value.lossHistory.toMutableList() else mutableListOf()
-        val gradLogits = FloatArray(T * vocab)
-        val startMs = System.currentTimeMillis() - _state.value.elapsedMs
-        var tokensSeen = if (resumeCheckpointCompatible) checkpointManager.loadMeta()?.tokensSeen ?: 0L else 0L
-        var step = startStep
+        var completedEpochs = if (resumeCheckpointCompatible) {
+            metadata?.epoch ?: _state.value.epoch
+        } else 0
+        completedEpochs = completedEpochs.coerceIn(0, hp.epochs)
+        if (completedEpochs >= hp.epochs) {
+            _state.value = _state.value.copy(
+                phase = Phase.FINISHED,
+                epoch = completedEpochs,
+                currentEpoch = completedEpochs,
+                message = "Target $completedEpochs epoch sudah tercapai. Naikkan pengaturan Epoch untuk training tambahan."
+            )
+            return
+        }
 
-        fun saveLastValidCheckpoint() {
-            // A bad loss/gradient must not discard valid optimizer updates since the
-            // previous periodic save. Atomic save keeps the earlier checkpoint on failure.
+        var step = optimizer.step
+        val remainingEpochs = hp.epochs - completedEpochs
+        val plannedStepsLong = step.toLong() + remainingEpochs.toLong() * stepsPerEpoch.toLong()
+        val plannedTotalSteps = plannedStepsLong.coerceAtMost(Int.MAX_VALUE.toLong()).toInt().coerceAtLeast(step + 1)
+        // Small datasets can have fewer than the requested warmup steps. Cap warmup
+        // to 10% of the remaining update count so LR does not stay near zero for all epochs.
+        val effectiveWarmup = minOf(hp.warmupSteps, ((plannedTotalSteps - step).coerceAtLeast(0) / 10))
+        val scheduler = CosineWarmupScheduler(
+            maxLR = hp.learningRate,
+            warmupSteps = effectiveWarmup,
+            totalSteps = plannedTotalSteps
+        )
+        var bestVal = metadata?.bestValLoss ?: Float.MAX_VALUE
+        var patienceCount = metadata?.patienceCount ?: 0
+        val history = (metadata?.lossHistory ?: _state.value.lossHistory).toMutableList()
+        var tokensSeen = metadata?.tokensSeen ?: 0L
+        val runStartMs = System.currentTimeMillis() - _state.value.elapsedMs
+
+        fun saveLastValidCheckpoint(completed: Int) {
             try {
-                saveCheckpoint(m, optimizer, tok, step, bestVal, patienceCount, history, tokensSeen)
+                saveCheckpoint(m, optimizer, tok, step, completed, bestVal, patienceCount, history, tokensSeen)
             } catch (_: Exception) {
-                // Preserve the original training error; any previous checkpoint remains intact.
+                // Keep the previous atomically-published checkpoint if saving fails.
             }
         }
 
-        while (step < hp.maxSteps && !stopped) {
-            while (paused && !stopped) delay(200)
+        for (epochIndex in completedEpochs until hp.epochs) {
             if (stopped) break
+            val starts = IntArray(windowCount) { it * S }
+            val random = Random(2026 + epochIndex)
+            for (i in starts.lastIndex downTo 1) {
+                val j = random.nextInt(i + 1)
+                val tmp = starts[i]
+                starts[i] = starts[j]
+                starts[j] = tmp
+            }
 
-            // Chat inference shares this GPT instance and mutates its forward-pass caches.
-            // Hold the model monitor for the complete step (including validation) so inference
-            // cannot overwrite those caches between forward and backward.
-            synchronized(m) {
-            val stepStart = System.currentTimeMillis()
-            // Sample random batch windows
-            val input = IntArray(T); val target = IntArray(T)
-            for (b in 0 until B) {
-                val start = rng.nextInt(trainEnd - span + 1)
-                for (s in 0 until S) {
-                    input[b * S + s] = corpus[start + s]
-                    target[b * S + s] = corpus[start + s + 1]
+            for (batchIndex in 0 until stepsPerEpoch) {
+                while (paused && !stopped) {
+                    if (_state.value.phase != Phase.PAUSED) {
+                        _state.value = _state.value.copy(phase = Phase.PAUSED, message = "Training dijeda.")
+                    }
+                    delay(200)
                 }
-            }
-            _state.value = _state.value.copy(message = "Forward pass — step ${step + 1}/${hp.maxSteps}. Menghitung prediksi model…")
-            m.zeroGrad()
-            val logits = m.forward(input, B, S, training = true)
-            val loss = crossEntropy(logits, target, vocab, gradLogits)
-            if (!loss.isFinite()) {
-                _state.value = _state.value.copy(phase = Phase.ERROR, message = "Loss bukan angka valid; training dihentikan.")
-                saveLastValidCheckpoint()
-                return
-            }
+                if (stopped) break
 
-            _state.value = _state.value.copy(message = "Backpropagation — step ${step + 1}/${hp.maxSteps}. Menghitung gradien…")
-            m.backward(gradLogits)
-
-            // Gradient clipping
-            val grads = pairs.map { it.second }
-            val gNorm = MathUtil.gradNorm(*grads.toTypedArray())
-            if (!gNorm.isFinite() || gNorm < 0f) {
+                val begin = batchIndex * B
+                val actualBatch = minOf(B, starts.size - begin)
+                if (actualBatch <= 0) break
+                val T = actualBatch * S
+                val input = IntArray(T)
+                val target = IntArray(T)
+                for (b in 0 until actualBatch) {
+                    val start = starts[begin + b]
+                    for (s in 0 until S) {
+                        input[b * S + s] = corpus[start + s]
+                        target[b * S + s] = corpus[start + s + 1]
+                    }
+                }
+                val gradLogits = FloatArray(T * vocab)
+                val isLastBatch = batchIndex == stepsPerEpoch - 1
                 _state.value = _state.value.copy(
-                    phase = Phase.ERROR,
-                    message = "Gradien tidak finite; optimizer tidak dijalankan agar bobot tidak rusak."
+                    phase = Phase.RUNNING,
+                    epoch = completedEpochs,
+                    currentEpoch = epochIndex + 1,
+                    batchInEpoch = batchIndex + 1,
+                    batchesInEpoch = stepsPerEpoch,
+                    step = step,
+                    message = "Epoch \${epochIndex + 1}/\${hp.epochs} · batch \${batchIndex + 1}/$stepsPerEpoch — forward pass…"
                 )
-                saveLastValidCheckpoint()
-                return
-            }
-            if (gNorm > hp.gradClip) {
-                val sc = hp.gradClip / gNorm
-                for (g in grads) MathUtil.scale(g, sc)
-            }
-            _state.value = _state.value.copy(message = "Optimizer — menerapkan perubahan bobot step ${step + 1}…")
-            val lr = scheduler.lrAt(step)
-            optimizer.step(lr)
-            step = optimizer.step
-            tokensSeen += T.toLong()
 
-            val stepMs = (System.currentTimeMillis() - stepStart).coerceAtLeast(1)
-            val tps = T * 1000f / stepMs
-            val elapsed = System.currentTimeMillis() - startMs
-            val stepsLeft = (hp.maxSteps - step).coerceAtLeast(0)
-            // Keep sub-1 token/s values valid; truncating tps to Long could make
-            // the denominator zero and terminate training during ETA calculation.
-            val eta = if (tps.isFinite() && tps > 0f) {
-                (stepsLeft.toDouble() * T.toDouble() * 1000.0 / tps.toDouble())
-                    .coerceIn(0.0, Long.MAX_VALUE.toDouble())
-                    .toLong()
-            } else 0L
+                synchronized(m) {
+                    val stepStart = System.currentTimeMillis()
+                    m.zeroGrad()
+                    val logits = m.forward(input, actualBatch, S, training = true)
+                    val loss = crossEntropy(logits, target, vocab, gradLogits)
+                    if (!loss.isFinite()) {
+                        _state.value = _state.value.copy(
+                            phase = Phase.ERROR,
+                            message = "Loss tidak valid pada epoch \${epochIndex + 1}, batch \${batchIndex + 1}; optimizer dihentikan."
+                        )
+                        saveLastValidCheckpoint(completedEpochs)
+                        return
+                    }
 
-            history += loss
-            if (history.size > 1000) history.removeAt(0)
+                    _state.value = _state.value.copy(
+                        message = "Epoch \${epochIndex + 1}/\${hp.epochs} · batch \${batchIndex + 1}/$stepsPerEpoch — backpropagation…"
+                    )
+                    m.backward(gradLogits)
 
-            var valLoss = _state.value.valLoss
-            if (step % hp.evalEvery == 0) {
-                _state.value = _state.value.copy(message = "Evaluasi validation loss — step $step…")
-                valLoss = evaluate(m, vocab, trainEnd, valSize, B, S, gradLogits)
-                if (valLoss < bestVal - 1e-4f) { bestVal = valLoss; patienceCount = 0 }
-                else {
-                    patienceCount++
-                    if (patienceCount >= hp.patience) {
-                        _state.value = buildState(step, loss, valLoss, bestVal, lr, gNorm, tps, elapsed, eta, history, Phase.EARLY_STOPPED, "Early stop — val loss tidak membaik setelah $patienceCount evaluasi.")
-                        saveCheckpoint(m, optimizer, tok, step, bestVal, patienceCount, history, tokensSeen)
+                    val grads = pairs.map { it.second }
+                    val gNorm = MathUtil.gradNorm(*grads.toTypedArray())
+                    if (!gNorm.isFinite() || gNorm < 0f) {
+                        _state.value = _state.value.copy(
+                            phase = Phase.ERROR,
+                            message = "Gradien tidak valid pada epoch \${epochIndex + 1}; optimizer tidak dijalankan."
+                        )
+                        saveLastValidCheckpoint(completedEpochs)
+                        return
+                    }
+                    if (gNorm > hp.gradClip) {
+                        val scale = hp.gradClip / gNorm
+                        for (g in grads) MathUtil.scale(g, scale)
+                    }
+
+                    _state.value = _state.value.copy(
+                        message = "Epoch \${epochIndex + 1}/\${hp.epochs} · batch \${batchIndex + 1}/$stepsPerEpoch — AdamW memperbarui bobot…"
+                    )
+                    val lr = scheduler.lrAt(step)
+                    optimizer.step(lr)
+                    step = optimizer.step
+                    tokensSeen += T.toLong()
+
+                    val stepMs = (System.currentTimeMillis() - stepStart).coerceAtLeast(1)
+                    val tps = T * 1000f / stepMs
+                    val elapsed = System.currentTimeMillis() - runStartMs
+                    val batchesAfterCurrent = (stepsPerEpoch - batchIndex - 1).coerceAtLeast(0) +
+                        ((hp.epochs - epochIndex - 1).coerceAtLeast(0) * stepsPerEpoch)
+                    val eta = if (tps.isFinite() && tps > 0f) {
+                        (batchesAfterCurrent.toDouble() * T.toDouble() * 1000.0 / tps.toDouble())
+                            .coerceIn(0.0, Long.MAX_VALUE.toDouble()).toLong()
+                    } else 0L
+
+                    history += loss
+                    if (history.size > 1000) history.removeAt(0)
+
+                    var valLoss = _state.value.valLoss
+                    var shouldStopEarly = false
+                    if (step % hp.evalEvery == 0 || isLastBatch) {
+                        _state.value = _state.value.copy(
+                            message = "Epoch \${epochIndex + 1}/\${hp.epochs} · evaluasi validation loss pada step $step…"
+                        )
+                        valLoss = evaluate(m, vocab, trainEnd, B, S)
+                        if (!valLoss.isFinite()) {
+                            _state.value = _state.value.copy(phase = Phase.ERROR, message = "Validation loss tidak valid; training dihentikan.")
+                            saveLastValidCheckpoint(completedEpochs)
+                            return
+                        }
+                        if (valLoss < bestVal - 1e-4f) {
+                            bestVal = valLoss
+                            patienceCount = 0
+                        } else {
+                            patienceCount++
+                            shouldStopEarly = patienceCount >= hp.patience
+                        }
+                    }
+
+                    val activePhase = if (paused) Phase.PAUSED else Phase.RUNNING
+                    val activeMessage = if (paused) {
+                        "Epoch \${epochIndex + 1}/\${hp.epochs}: batch \${batchIndex + 1}/$stepsPerEpoch selesai; training dijeda."
+                    } else {
+                        "Training aktif — epoch \${epochIndex + 1}/\${hp.epochs}, batch \${batchIndex + 1}/$stepsPerEpoch."
+                    }
+                    _state.value = buildState(
+                        step = step,
+                        completedEpochs = completedEpochs,
+                        currentEpoch = epochIndex + 1,
+                        batchIndex = batchIndex + 1,
+                        batchesPerEpoch = stepsPerEpoch,
+                        loss = loss,
+                        valLoss = valLoss,
+                        best = bestVal,
+                        lr = lr,
+                        gNorm = gNorm,
+                        tps = tps,
+                        elapsed = elapsed,
+                        eta = eta,
+                        hist = history,
+                        phase = if (shouldStopEarly) Phase.EARLY_STOPPED else activePhase,
+                        msg = if (shouldStopEarly) "Early stop: validation loss tidak membaik setelah $patienceCount evaluasi." else activeMessage
+                    )
+
+                    if (step % hp.saveEvery == 0) {
+                        _state.value = _state.value.copy(message = "Menyimpan checkpoint di step $step…")
+                        saveCheckpoint(m, optimizer, tok, step, completedEpochs, bestVal, patienceCount, history, tokensSeen)
+                    }
+                    if (shouldStopEarly) {
+                        saveCheckpoint(m, optimizer, tok, step, completedEpochs, bestVal, patienceCount, history, tokensSeen)
                         return
                     }
                 }
             }
 
-            val activePhase = if (paused) Phase.PAUSED else Phase.RUNNING
-            val activeMessage = if (paused) "Step $step selesai; training dijeda." else "Training aktif — step $step/${hp.maxSteps}"
-            _state.value = buildState(step, loss, valLoss, bestVal, lr, gNorm, tps, elapsed, eta, history, activePhase, activeMessage)
-
-            if (step % hp.saveEvery == 0) {
-                _state.value = _state.value.copy(message = "Menyimpan checkpoint — step $step…")
-                saveCheckpoint(m, optimizer, tok, step, bestVal, patienceCount, history, tokensSeen)
-                _state.value = _state.value.copy(message = "Checkpoint disimpan (step $step). Bobot terus bertambah.")
-            }
-            }
+            if (stopped) break
+            completedEpochs = epochIndex + 1
+            _state.value = _state.value.copy(
+                phase = Phase.RUNNING,
+                epoch = completedEpochs,
+                currentEpoch = completedEpochs,
+                batchInEpoch = stepsPerEpoch,
+                batchesInEpoch = stepsPerEpoch,
+                step = step,
+                message = "Epoch $completedEpochs/\${hp.epochs} selesai. Menyimpan checkpoint bobot dan optimizer…"
+            )
+            // Always publish a complete-epoch checkpoint so a restart never mistakes
+            // the optimizer step count for the completed epoch count.
+            saveCheckpoint(m, optimizer, tok, step, completedEpochs, bestVal, patienceCount, history, tokensSeen)
         }
+
         _state.value = _state.value.copy(message = "Menyimpan checkpoint akhir…")
-        saveCheckpoint(m, optimizer, tok, step, bestVal, patienceCount, history, tokensSeen)
+        saveCheckpoint(m, optimizer, tok, step, completedEpochs, bestVal, patienceCount, history, tokensSeen)
         _state.value = _state.value.copy(
             phase = if (stopped) Phase.READY else Phase.FINISHED,
-            message = if (stopped) "Dihentikan pengguna. Checkpoint disimpan." else "Selesai! Checkpoint final disimpan."
+            epoch = completedEpochs,
+            currentEpoch = completedEpochs,
+            batchInEpoch = if (completedEpochs > 0) stepsPerEpoch else 0,
+            batchesInEpoch = stepsPerEpoch,
+            step = step,
+            message = if (stopped) {
+                "Training dihentikan pengguna. Checkpoint tersimpan pada epoch $completedEpochs."
+            } else {
+                "Training selesai: $completedEpochs/\${hp.epochs} epoch. Checkpoint final tersimpan."
+            }
         )
     }
 
-    private fun buildState(step: Int, loss: Float, valLoss: Float, best: Float, lr: Float, gNorm: Float, tps: Float, elapsed: Long, eta: Long, hist: List<Float>, phase: Phase, msg: String) =
-        _state.value.copy(phase = phase, step = step, loss = loss, valLoss = valLoss, bestValLoss = best, lr = lr, gradNorm = gNorm, tokensPerSec = tps, elapsedMs = elapsed, etaMs = eta, lossHistory = hist.toList(), message = msg)
+    private fun buildState(
+        step: Int,
+        completedEpochs: Int,
+        currentEpoch: Int,
+        batchIndex: Int,
+        batchesPerEpoch: Int,
+        loss: Float,
+        valLoss: Float,
+        best: Float,
+        lr: Float,
+        gNorm: Float,
+        tps: Float,
+        elapsed: Long,
+        eta: Long,
+        hist: List<Float>,
+        phase: Phase,
+        msg: String
+    ) = _state.value.copy(
+        phase = phase,
+        step = step,
+        epoch = completedEpochs,
+        currentEpoch = currentEpoch,
+        batchInEpoch = batchIndex,
+        batchesInEpoch = batchesPerEpoch,
+        loss = loss,
+        valLoss = valLoss,
+        bestValLoss = best,
+        lr = lr,
+        gradNorm = gNorm,
+        tokensPerSec = tps,
+        elapsedMs = elapsed,
+        etaMs = eta,
+        lossHistory = hist.toList(),
+        message = msg
+    )
 
-    private fun evaluate(m: GPT, vocab: Int, trainEnd: Int, valSize: Int, B: Int, S: Int, gradLogits: FloatArray): Float {
-        val T = B * S
-        var total = 0f; var n = 0
-        val input = IntArray(T); val target = IntArray(T)
-        val batches = (valSize / (B * (S + 1))).coerceIn(1, 4)
-        for (it in 0 until batches) {
-            val base = trainEnd + it * B * (S + 1)
-            for (b in 0 until B) {
-                val st = base + b * (S + 1)
-                if (st + S >= corpus.size) break
-                for (s in 0 until S) { input[b * S + s] = corpus[st + s]; target[b * S + s] = corpus[st + s + 1] }
+    /** Evaluate a bounded number of deterministic windows from the held-out corpus tail. */
+    private fun evaluate(m: GPT, vocab: Int, trainEnd: Int, B: Int, S: Int): Float {
+        val valWindowCount = ((corpus.size - trainEnd - 1) / S).coerceAtLeast(0)
+        if (valWindowCount <= 0) return Float.NaN
+        val maxWindows = minOf(valWindowCount, B * 4)
+        var totalLoss = 0.0
+        var totalTokens = 0L
+        var offset = 0
+        while (offset < maxWindows) {
+            val actualBatch = minOf(B, maxWindows - offset)
+            val T = actualBatch * S
+            val input = IntArray(T)
+            val target = IntArray(T)
+            for (b in 0 until actualBatch) {
+                val start = trainEnd + (offset + b) * S
+                for (s in 0 until S) {
+                    input[b * S + s] = corpus[start + s]
+                    target[b * S + s] = corpus[start + s + 1]
+                }
             }
-            val logits = m.forward(input, B, S, training = false)
-            total += crossEntropy(logits, target, vocab, gradLogits); n++
+            val logits = m.forward(input, actualBatch, S, training = false)
+            val gradLogits = FloatArray(T * vocab)
+            val loss = crossEntropy(logits, target, vocab, gradLogits)
+            if (!loss.isFinite()) return Float.NaN
+            totalLoss += loss.toDouble() * T
+            totalTokens += T
+            offset += actualBatch
         }
-        return if (n > 0) total / n else 0f
+        return if (totalTokens > 0L) (totalLoss / totalTokens).toFloat() else Float.NaN
     }
 
-    private fun saveCheckpoint(m: GPT, opt: AdamW, tok: Tokenizer, step: Int, best: Float, patience: Int, hist: List<Float>, tokensSeen: Long) {
-        checkpointManager.save(m, opt, tok, CheckpointManager.Meta(step, step, best, patience, hist.takeLast(500), tokensSeen))
+    private fun saveCheckpoint(
+        m: GPT,
+        opt: AdamW,
+        tok: Tokenizer,
+        step: Int,
+        completedEpochs: Int,
+        best: Float,
+        patience: Int,
+        hist: List<Float>,
+        tokensSeen: Long
+    ) {
+        checkpointManager.save(
+            m, opt, tok,
+            CheckpointManager.Meta(step, completedEpochs, best, patience, hist.takeLast(500), tokensSeen)
+        )
         resumeCheckpointCompatible = true
     }
 

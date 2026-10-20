@@ -55,9 +55,15 @@ fun TrainScreen() {
     val running = state.phase == Phase.RUNNING
     val paused = state.phase == Phase.PAUSED
     val settingsEnabled = state.phase !in setOf(Phase.RUNNING, Phase.PAUSED, Phase.IMPORTING)
-    val progress = (state.step.toFloat() / hp.maxSteps.coerceAtLeast(1)).coerceIn(0f, 1f)
+    val runProgress = (state.currentEpoch - 1).coerceAtLeast(0) +
+        if (state.batchesInEpoch > 0) state.batchInEpoch.toFloat() / state.batchesInEpoch else 0f
+    val progress = when (state.phase) {
+        Phase.FINISHED -> 1f
+        else -> (runProgress / hp.epochs.coerceAtLeast(1)).coerceIn(0f, 1f)
+    }
     val progressPercent = (progress * 100).toInt()
-    val canStart = state.numTokens > 0 &&
+    val targetReached = state.epoch >= hp.epochs && state.numTokens > 0
+    val canStart = state.numTokens > 0 && !targetReached &&
         state.phase in setOf(Phase.READY, Phase.IDLE, Phase.FINISHED, Phase.EARLY_STOPPED, Phase.ERROR)
 
     Column(
@@ -95,7 +101,11 @@ fun TrainScreen() {
                 color = phaseColor(state.phase),
                 trackColor = NexoraSurfaceVar
             )
-            Text(state.step.toString() + " / " + hp.maxSteps + " step target", color = NexoraOnSurface, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+            Text(
+                "Epoch " + (state.currentEpoch.coerceAtLeast(state.epoch)) + " / " + hp.epochs +
+                    if (state.batchesInEpoch > 0) " · batch ${state.batchInEpoch}/${state.batchesInEpoch}" else "",
+                color = NexoraOnSurface, fontSize = 12.sp, fontWeight = FontWeight.Medium
+            )
             Text(state.message.ifBlank { "Impor dataset untuk menginisialisasi model dan tokenizer." }, color = NexoraMuted, fontSize = 12.sp)
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -137,6 +147,8 @@ fun TrainScreen() {
             }
             if (state.numTokens <= 0) {
                 Text("Belum ada dataset aktif. Buka tab Data untuk mengimpor TXT, CSV, atau JSONL terlebih dahulu.", color = NexoraMuted, fontSize = 11.sp)
+            } else if (targetReached && state.phase != Phase.RUNNING && state.phase != Phase.PAUSED) {
+                Text("Target epoch sudah tercapai. Naikkan Jumlah epoch untuk meneruskan training.", color = NexoraMuted, fontSize = 11.sp)
             }
         }
 
@@ -206,7 +218,7 @@ fun TrainScreen() {
 
         SectionTitle("Pengaturan training")
         Text(
-            "Pengaturan disimpan otomatis untuk sesi berikutnya. Max steps adalah jumlah update bobot, bukan jumlah epoch. Pengaturan dikunci selama training agar target tidak berubah diam-diam.",
+            "Training melewati dataset per epoch; setiap epoch mengacak urutan sequence dan memperbarui bobot melalui backpropagation + AdamW. Pengaturan terkunci saat training.",
             color = NexoraMuted,
             fontSize = 12.sp
         )
@@ -220,8 +232,8 @@ fun TrainScreen() {
             LabeledSlider("Warmup steps", hp.warmupSteps.toDouble(), 0.0..500.0, { "%.0f".format(it) }, enabled = settingsEnabled) {
                 AppSettings.updateHp { p -> p.copy(warmupSteps = it.toInt().coerceIn(0, 500)) }
             }
-            LabeledSlider("Max training steps", hp.maxSteps.toDouble(), 500.0..20000.0, { "%.0f".format(it) }, enabled = settingsEnabled) {
-                AppSettings.updateHp { p -> p.copy(maxSteps = it.toInt().coerceIn(500, 20000)) }
+            LabeledSlider("Jumlah epoch", hp.epochs.toDouble(), 1.0..100.0, { "%.0f".format(it) }, enabled = settingsEnabled) {
+                AppSettings.updateHp { p -> p.copy(epochs = it.toInt().coerceIn(1, 100)) }
             }
             LabeledSlider("Validation setiap N step", hp.evalEvery.toDouble(), 25.0..500.0, { "%.0f".format(it) }, enabled = settingsEnabled) {
                 AppSettings.updateHp { p -> p.copy(evalEvery = it.toInt().coerceAtLeast(1)) }

@@ -18,6 +18,11 @@ import java.io.FileOutputStream
  */
 class CheckpointManager(private val dir: File) {
 
+    companion object {
+        private const val META_MAGIC = 0x4E584D31
+        private const val META_VERSION = 1
+    }
+
     init {
         val parent = dir.parentFile
         if (parent != null) {
@@ -77,6 +82,7 @@ class CheckpointManager(private val dir: File) {
                 }
             }
             DataOutputStream(BufferedOutputStream(FileOutputStream(File(staging, "meta.bin")), 1 shl 20)).use { output ->
+                output.writeInt(META_MAGIC); output.writeInt(META_VERSION)
                 output.writeInt(meta.step); output.writeInt(meta.epoch); output.writeFloat(meta.bestValLoss)
                 output.writeInt(meta.patienceCount); output.writeLong(meta.tokensSeen)
                 output.writeInt(meta.lossHistory.size)
@@ -155,8 +161,13 @@ class CheckpointManager(private val dir: File) {
 
     fun loadMeta(): Meta? = try {
         DataInputStream(BufferedInputStream(FileInputStream(File(dir, "meta.bin")), 1 shl 20)).use { input ->
-            val step = input.readInt()
-            val epoch = input.readInt()
+            val marker = input.readInt()
+            val versioned = marker == META_MAGIC
+            if (versioned) require(input.readInt() == META_VERSION) { "Unsupported checkpoint metadata version" }
+            val step = if (versioned) input.readInt() else marker
+            val storedEpoch = input.readInt()
+            // Migrate metadata from the earlier Nexora2 build: it wrote step into both fields.
+            val epoch = if (!versioned && step > 0 && storedEpoch == step) 0 else storedEpoch
             val best = input.readFloat()
             val patience = input.readInt()
             val tokens = input.readLong()
@@ -165,6 +176,7 @@ class CheckpointManager(private val dir: File) {
             require(count in 0..500) { "Invalid loss history size" }
             val history = List(count) { input.readFloat().also { loss -> require(loss.isFinite()) } }
             require(best.isFinite() || best == Float.MAX_VALUE)
+            require(input.read() == -1) { "Unexpected trailing checkpoint metadata" }
             Meta(step, epoch, best, patience, history, tokens)
         }
     } catch (_: Exception) { null }

@@ -29,6 +29,7 @@ object AppSettings {
         return input.copy(
             learningRate = finiteIn(input.learningRate, 3e-4f, 1e-5f..1e-2f),
             batchSize = input.batchSize.coerceIn(1, 16),
+            epochs = input.epochs.coerceIn(1, 100),
             warmupSteps = input.warmupSteps.coerceIn(0, 500),
             maxSteps = input.maxSteps.coerceIn(500, 20_000),
             saveEvery = input.saveEvery.coerceIn(25, 1_000),
@@ -46,6 +47,7 @@ object AppSettings {
         _hp.value = normalizeHyperParams(HyperParams(
             learningRate = p.getFloat("learning_rate", 3e-4f),
             batchSize = p.getInt("batch_size", 4),
+            epochs = p.getInt("epochs", 3),
             warmupSteps = p.getInt("warmup_steps", 100),
             maxSteps = p.getInt("max_steps", 5000),
             saveEvery = p.getInt("save_every", 200),
@@ -67,6 +69,7 @@ object AppSettings {
         val editor = preferences?.edit() ?: return
         editor.putFloat("learning_rate", next.learningRate)
         editor.putInt("batch_size", next.batchSize)
+        editor.putInt("epochs", next.epochs)
         editor.putInt("warmup_steps", next.warmupSteps)
         editor.putInt("max_steps", next.maxSteps)
         editor.putInt("save_every", next.saveEvery)

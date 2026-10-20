@@ -40,8 +40,8 @@ class TrainingService : Service() {
             TrainingController.state.collectLatest { s ->
                 val nm = getSystemService(NotificationManager::class.java)
                 nm.notify(NOTIF_ID, buildNotification(
-                    "Nexora — step ${s.step}",
-                    "${s.phase.name} · ${if (s.loss.isFinite()) "loss ${String.format("%.4f", s.loss)}" else "loss belum tersedia"} · ${s.tokensPerSec.toInt()} tok/s"
+                    "Nexora — epoch ${s.currentEpoch.coerceAtLeast(s.epoch)}/${s.totalEpochs}",
+                    "${s.phase.name} · batch ${s.batchInEpoch}/${s.batchesInEpoch} · ${if (s.loss.isFinite()) "loss ${String.format("%.4f", s.loss)}" else "loss belum tersedia"} · ${s.tokensPerSec.toInt()} tok/s"
                 ))
                 if (s.phase != Phase.RUNNING && s.phase != Phase.PAUSED) {
                     stopSelf()

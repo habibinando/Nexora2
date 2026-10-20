@@ -41,7 +41,9 @@ import com.Nexora.ai.ui.theme.NexoraPrimary
 fun HomeScreen(nav: NavController) {
     val s by TrainingController.state.collectAsState()
     val hp by AppSettings.hp.collectAsState()
-    val progress = (s.step.toFloat() / hp.maxSteps.coerceAtLeast(1)).coerceIn(0f, 1f)
+    val runProgress = (s.currentEpoch - 1).coerceAtLeast(0) +
+        if (s.batchesInEpoch > 0) s.batchInEpoch.toFloat() / s.batchesInEpoch else 0f
+    val progress = if (s.phase == Phase.FINISHED) 1f else (runProgress / hp.epochs.coerceAtLeast(1)).coerceIn(0f, 1f)
     val phaseColor = when (s.phase) {
         Phase.RUNNING -> Color(0xFF10B981)
         Phase.PAUSED, Phase.IMPORTING -> NexoraAmber
@@ -68,7 +70,11 @@ fun HomeScreen(nav: NavController) {
             }
             if (s.numTokens > 0) {
                 LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth(), color = phaseColor)
-                KeyValueRow("Progres training", s.step.toString() + " / " + hp.maxSteps + " step")
+                KeyValueRow(
+                    "Progres training",
+                    "Epoch " + s.currentEpoch.coerceAtLeast(s.epoch) + " / " + hp.epochs +
+                        if (s.batchesInEpoch > 0) " · batch ${s.batchInEpoch}/${s.batchesInEpoch}" else ""
+                )
                 KeyValueRow("Loss", if (s.loss.isFinite()) "%.5f".format(s.loss) else "Belum ada step")
                 KeyValueRow("Validation loss", if (s.valLoss.isFinite()) "%.5f".format(s.valLoss) else "Belum dievaluasi")
             }
