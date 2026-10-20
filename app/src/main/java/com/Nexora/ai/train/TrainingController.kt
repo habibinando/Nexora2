@@ -112,8 +112,15 @@ object TrainingController {
     @Volatile private var liveOperationStartedAtMs: Long = 0L
     private var heartbeatJob: Job? = null
 
+    private class TrainingStopRequestedException : RuntimeException()
+
     /** Publish a real operation boundary and restart its monotonic stage timer. */
     private fun reportOperation(label: String) {
+        // Never interrupt AdamW halfway through mutating parameters; let that complete
+        // update finish, then stop at the next safe compute boundary.
+        if (stopped && !label.contains("menyiapkan batch", true) && !label.contains("adamw", true)) {
+            throw TrainingStopRequestedException()
+        }
         liveOperationLabel = label
         liveOperationStartedAtMs = SystemClock.elapsedRealtime()
         // Operation callbacks arrive at real compute boundaries. Layer callbacks let
@@ -136,6 +143,8 @@ object TrainingController {
             (((batchCurrent - 1).coerceAtLeast(0) * headTotal + (headCurrent - 1).coerceAtLeast(0)).toFloat() /
                 (batchTotal.toLong() * headTotal.toLong()).toFloat()).coerceIn(0f, 1f)
         } else 0f
+        val optimizerPercent = Regex("(\\d{1,3})%").find(label)
+            ?.groupValues?.getOrNull(1)?.toFloatOrNull()?.coerceIn(0f, 100f)
         val backwardSubstage = when {
             label.contains("mlp backpropagation", true) -> 0.01f
             label.contains("mlp fc2", true) && label.contains("gradien bobot", true) -> 0.05f
@@ -173,7 +182,7 @@ object TrainingController {
             }
             label.contains("backward", true) -> 0.45f
             label.contains("gradient norm", true) -> 0.91f
-            label.contains("adamw", true) -> 0.97f
+            label.contains("adamw", true) -> optimizerPercent?.let { 0.91f + 0.06f * it / 100f } ?: 0.91f
             label.contains("validasi", true) -> 0.98f
             label.contains("checkpoint", true) -> 0.995f
             else -> liveBatchProgress.coerceAtLeast(0.01f)
@@ -619,6 +628,7 @@ object TrainingController {
                 )
 
                 synchronized(m) {
+                    try {
                     val stepStart = System.currentTimeMillis()
                     reportOperation("Zero-grad · membersihkan gradien batch")
                     m.zeroGrad()
@@ -734,6 +744,25 @@ object TrainingController {
                     }
                     if (shouldStopEarly) {
                         saveCheckpoint(m, optimizer, tok, step, completedEpochs, bestVal, patienceCount, history, tokensSeen)
+                        return
+                    }
+                    } catch (_: TrainingStopRequestedException) {
+                        // Parameters are only changed inside the atomic AdamW step. A stop
+                        // requested elsewhere can therefore safely preserve the last complete
+                        // update and the corresponding optimizer moments/checkpoint.
+                        saveLastValidCheckpoint(completedEpochs)
+                        _state.value = _state.value.copy(
+                            phase = Phase.READY,
+                            step = step,
+                            epoch = completedEpochs,
+                            currentEpoch = epochIndex + 1,
+                            batchInEpoch = batchIndex + 1,
+                            batchesInEpoch = stepsPerEpoch,
+                            etaMs = 0L,
+                            operation = "Stop aman · checkpoint disimpan",
+                            batchProgress = 0f,
+                            message = "Training dihentikan pada batas aman. $step update bobot lengkap dipertahankan; tidak ada update parsial yang disimpan."
+                        )
                         return
                     }
                 }

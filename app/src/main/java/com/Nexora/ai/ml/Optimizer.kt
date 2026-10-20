@@ -17,10 +17,16 @@ class AdamW(
     var step: Int = 0
         private set
 
-    fun step(lr: Float) {
+    fun step(lr: Float, onProgress: ((String) -> Unit)? = null) {
+        require(lr.isFinite() && lr >= 0f) { "Learning rate must be finite and non-negative." }
         step++
         val bc1 = 1f - beta1.pow(step)
         val bc2 = 1f - beta2.pow(step)
+        val totalElements = params.sumOf { it.first.size.toLong() }.coerceAtLeast(1L)
+        val reportEvery = (totalElements / 50L).coerceAtLeast(1L)
+        var processed = 0L
+        var nextReport = reportEvery
+
         for (idx in params.indices) {
             val (p, g) = params[idx]
             val mi = m[idx]; val vi = v[idx]
@@ -31,8 +37,15 @@ class AdamW(
                 val mhat = mi[i] / bc1
                 val vhat = vi[i] / bc2
                 p[i] -= lr * (mhat / (sqrt(vhat) + eps) + weightDecay * p[i])
+                processed++
+                if (processed >= nextReport) {
+                    val percent = (processed * 100L / totalElements).coerceIn(0L, 100L)
+                    onProgress?.invoke("AdamW · bobot $percent% diperbarui")
+                    nextReport += reportEvery
+                }
             }
         }
+        onProgress?.invoke("AdamW · bobot 100% diperbarui")
     }
 
     fun state(): List<Pair<FloatArray, FloatArray>> = m.zip(v)
