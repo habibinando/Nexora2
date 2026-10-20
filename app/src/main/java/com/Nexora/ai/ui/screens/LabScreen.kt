@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.sp
 import com.Nexora.ai.benchmark.BenchmarkResult
 import com.Nexora.ai.benchmark.BenchmarkRunner
 import com.Nexora.ai.ml.NativeOps
+import com.Nexora.ai.system.DeviceDiagnostics
 import com.Nexora.ai.train.Phase
 import com.Nexora.ai.train.TrainingController
 import com.Nexora.ai.ui.AppSettings
@@ -64,10 +65,20 @@ fun LabScreen() {
     var benchError by remember { mutableStateOf<String?>(null) }
     var benchResult by remember { mutableStateOf<BenchmarkResult?>(null) }
     var gpuInfo by remember { mutableStateOf("GPU belum diperiksa") }
+    var deviceReport by remember { mutableStateOf<DeviceDiagnostics.Report?>(null) }
+    var deviceInfoBusy by remember { mutableStateOf(false) }
     var confirmReset by remember { mutableStateOf(false) }
     var headsExpanded by remember { mutableStateOf(false) }
 
-    LaunchedEffect(Unit) { gpuInfo = withContext(Dispatchers.IO) { NativeOps.gpuInfo() } }
+    LaunchedEffect(Unit) {
+        deviceInfoBusy = true
+        try {
+            deviceReport = withContext(Dispatchers.IO) { DeviceDiagnostics.read(context) }
+            gpuInfo = withContext(Dispatchers.IO) { NativeOps.gpuInfo() }
+        } finally {
+            deviceInfoBusy = false
+        }
+    }
     val validHeads = (2..16).filter { cfg.dModel % it == 0 }.ifEmpty { listOf(1) }
     val resetAllowed = !benchBusy &&
         train.phase !in setOf(Phase.RUNNING, Phase.PAUSED, Phase.IMPORTING)
@@ -77,6 +88,64 @@ fun LabScreen() {
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         GradientLabel("Lab • Benchmark & Setelan")
+
+        SectionTitle("Deteksi hardware aktual")
+        Text(
+            "Data dibaca dari Android/kernel dan Vulkan driver perangkat ini. RAM tersedia berubah-ubah; RAM tambahan/virtual dari fitur ekspansi OEM tidak dihitung sebagai RAM fisik.",
+            color = NexoraMuted, fontSize = 12.sp
+        )
+        OutlinedButton(
+            onClick = {
+                scope.launch {
+                    deviceInfoBusy = true
+                    try {
+                        deviceReport = withContext(Dispatchers.IO) { DeviceDiagnostics.read(context) }
+                        gpuInfo = withContext(Dispatchers.IO) { NativeOps.gpuInfo() }
+                    } finally {
+                        deviceInfoBusy = false
+                    }
+                }
+            },
+            enabled = !deviceInfoBusy,
+            modifier = Modifier.fillMaxWidth()
+        ) { Text(if (deviceInfoBusy) "Membaca perangkat…" else "Perbarui deteksi perangkat") }
+
+        deviceReport?.let { d ->
+            GlassCard {
+                KeyValueRow("Perangkat", d.device)
+                KeyValueRow("Android", d.androidVersion)
+                KeyValueRow("SoC / hardware", d.soc)
+                KeyValueRow("Identifikasi CPU", d.cpuDescription)
+                KeyValueRow("Core terlihat Android", d.cpuCoresRuntime.toString())
+                KeyValueRow("Core dilaporkan native", d.cpuCoresNative.toString())
+                KeyValueRow("ABI yang didukung", d.supportedAbis)
+                KeyValueRow("Frekuensi maksimum core", d.cpuFrequency)
+                KeyValueRow("RAM fisik kernel", DeviceDiagnostics.formatBytes(d.totalRamBytes))
+                if (d.advertisedRamBytes != null) {
+                    KeyValueRow("RAM yang diiklankan OEM", DeviceDiagnostics.formatBytes(d.advertisedRamBytes))
+                }
+                KeyValueRow("RAM tersedia sekarang", DeviceDiagnostics.formatBytes(d.availableRamBytes))
+                KeyValueRow("Kondisi low-memory OS", if (d.lowMemory) "Ya" else "Tidak")
+                KeyValueRow("Batas Java heap aplikasi", DeviceDiagnostics.formatBytes(d.appHeapMaxBytes))
+                KeyValueRow("Java heap terpakai", DeviceDiagnostics.formatBytes(d.appHeapUsedBytes))
+                KeyValueRow("Memory class / large heap", "\${d.memoryClassMb} / \${d.largeMemoryClassMb} MiB")
+                KeyValueRow("Status termal Android", d.thermalStatus)
+            }
+        }
+
+        SectionTitle("Vulkan driver dan penggunaan aktual")
+        GlassCard {
+            KeyValueRow("GPU/Vulkan", gpuInfo)
+            val compute = NativeOps.computeStats()
+            KeyValueRow("GEMM Vulkan berhasil", compute.gpuGemmCalls.toString())
+            KeyValueRow("GEMM CPU", compute.cpuGemmCalls.toString())
+            KeyValueRow("Fallback Vulkan → CPU", compute.gpuFallbacks.toString())
+            Text(
+                "Versi API Vulkan yang didukung GPU ditampilkan terpisah dari versi fitur yang dipakai aplikasi. Nexora hanya mengirim GEMM besar ke Vulkan setelah tes akurasi; attention, backpropagation, optimizer, dan operasi lain masih menggunakan CPU. Nol GEMM Vulkan berarti belum ada operasi yang sukses melewati jalur GPU pada hitungan saat ini.",
+                color = NexoraMuted, fontSize = 11.sp
+            )
+        }
+
         SectionTitle("Benchmark CPU/GPU")
         Text(
             "Tes CPU 512×512 dan Vulkan compute 512×512 dijalankan terpisah. Mini-training menghitung GEMM CPU/Vulkan yang benar-benar sukses setelah uji akurasi. Benchmark membebani perangkat; jangan jalankan bersamaan dengan training.",
@@ -139,8 +208,6 @@ fun LabScreen() {
                 KeyValueRow("RAM total / tersedia", "${r.ramTotalMb} MB / ${r.ramAvailMb} MB")
             }
         }
-        Text("Info backend Vulkan: $gpuInfo", color = NexoraMuted, fontSize = 11.sp)
-
         SectionTitle("Arsitektur model")
         Text(
             "Pengaturan ini digunakan saat impor dataset berikutnya. Mengubahnya tidak mengubah bobot model atau checkpoint aktif. Dimensi embedding dibuat kelipatan 8 dan attention heads dibatasi ke pembagi yang valid.",
