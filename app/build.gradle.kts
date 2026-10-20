@@ -13,12 +13,13 @@ android {
 
     defaultConfig {
         applicationId = "com.Nexora.ai"
-        minSdk = 26          // GLES 3.1 compute + Java NIO
+        minSdk = 31          // Android 12+; Vulkan compute preferred, CPU fallback remains
         targetSdk = 37
         versionCode = 1
         versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        shaders { glslcArgs += listOf("--target-env=vulkan1.0") }
         vectorDrawables { useSupportLibrary = true }
 
         externalNativeBuild {
