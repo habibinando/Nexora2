@@ -119,18 +119,47 @@ object TrainingController {
         // Operation callbacks arrive at real compute boundaries. Layer callbacks let
         // the UI show partial progress even while one batch has not reached AdamW yet.
         val layerMatch = Regex("layer\\s+(\\d+)\\s*/\\s*(\\d+)", RegexOption.IGNORE_CASE).find(label)
-        val layerFraction = layerMatch?.let {
-            val current = it.groupValues[1].toFloatOrNull() ?: 0f
-            val total = it.groupValues[2].toFloatOrNull() ?: 1f
-            if (total > 0f) (current / total).coerceIn(0f, 1f) else 0f
+        val currentLayer = layerMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
+        val layerCount = layerMatch?.groupValues?.getOrNull(2)?.toIntOrNull()
+        val validLayerProgress = currentLayer != null && layerCount != null &&
+            currentLayer in 1..layerCount && layerCount > 0
+        val batchMatch = Regex("batch\\s+(\\d+)\\s*/\\s*(\\d+)", RegexOption.IGNORE_CASE).find(label)
+        val batchCurrent = batchMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
+        val batchTotal = batchMatch?.groupValues?.getOrNull(2)?.toIntOrNull()
+        val backwardSubstage = when {
+            label.contains("mlp backpropagation", true) -> 0.01f
+            label.contains("mlp fc2", true) && label.contains("gradien bobot", true) -> 0.05f
+            label.contains("mlp fc2", true) && label.contains("gradien input", true) -> 0.12f
+            label.contains("activation/dropout derivative", true) -> 0.20f
+            label.contains("mlp fc1", true) && label.contains("gradien bobot", true) -> 0.30f
+            label.contains("mlp fc1", true) && label.contains("gradien input", true) -> 0.38f
+            label.contains("layer norm ffn", true) -> 0.48f
+            label.contains("attention backpropagation", true) -> 0.52f
+            label.contains("attention output projection", true) && label.contains("gradien bobot", true) -> 0.56f
+            label.contains("attention output projection", true) && label.contains("gradien input", true) -> 0.60f
+            label.contains("attention gradients", true) && label.contains("dv", true) -> 0.64f
+            label.contains("attention gradients", true) && batchCurrent != null && batchTotal != null && batchTotal > 0 ->
+                0.66f + 0.12f * ((batchCurrent - 1).toFloat() / batchTotal).coerceIn(0f, 1f)
+            label.contains("attention qkv projection", true) && label.endsWith("backpropagation", true) -> 0.80f
+            label.contains("attention qkv projection", true) && label.contains("gradien bobot", true) -> 0.84f
+            label.contains("attention qkv projection", true) && label.contains("gradien input", true) -> 0.91f
+            label.contains("layer norm attention backward", true) -> 0.98f
+            else -> 0f
         }
         val stageFraction = when {
             label.contains("menyiapkan batch", true) -> 0.01f
             label.contains("zero-grad", true) -> 0.03f
-            label.contains("forward", true) && layerFraction != null -> 0.05f + 0.35f * layerFraction
+            label.contains("forward", true) && validLayerProgress ->
+                0.05f + 0.35f * ((currentLayer!! - 1).toFloat() / layerCount!!)
             label.contains("forward", true) -> 0.05f
             label.contains("cross-entropy", true) -> 0.43f
-            label.contains("backward", true) && layerFraction != null -> 0.45f + 0.43f * layerFraction
+            label.contains("backward", true) && validLayerProgress -> {
+                // GPT backpropagates in reverse order. The first visited layer is the
+                // highest index; mapping index/total directly makes progress jump near 90%
+                // on the first layer and then freeze because updates are monotonic.
+                val completedLayers = (layerCount!! - currentLayer!!).coerceAtLeast(0)
+                0.45f + 0.43f * (completedLayers + backwardSubstage.coerceIn(0f, 1f)) / layerCount.toFloat()
+            }
             label.contains("backward", true) -> 0.45f
             label.contains("gradient norm", true) -> 0.91f
             label.contains("adamw", true) -> 0.97f
