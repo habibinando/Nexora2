@@ -103,11 +103,14 @@ class MainActivity : ComponentActivity() {
                 }
                 LaunchedEffect(ready) {
                     // Android 13+ requires an explicit runtime request; a manifest entry alone is insufficient.
+                    val permissionPrefs = getSharedPreferences("nexora_permissions", MODE_PRIVATE)
                     if (ready && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                         ContextCompat.checkSelfPermission(
                             this@MainActivity, Manifest.permission.POST_NOTIFICATIONS
-                        ) != PackageManager.PERMISSION_GRANTED
+                        ) != PackageManager.PERMISSION_GRANTED &&
+                        !permissionPrefs.getBoolean("notification_prompt_attempted", false)
                     ) {
+                        permissionPrefs.edit().putBoolean("notification_prompt_attempted", true).apply()
                         delay(350)
                         notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                     }
