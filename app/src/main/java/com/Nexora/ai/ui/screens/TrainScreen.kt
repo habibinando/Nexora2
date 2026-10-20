@@ -215,13 +215,46 @@ fun TrainScreen() {
                 "Operasi aktif: " + state.operation.ifBlank { "menunggu perintah training" },
                 color = NexoraPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 3
             )
+
+            // Batch describes the dataset chunk; this panel tracks the actual weight-update step.
+            val stepTarget = maxOf(state.targetSteps, state.step, 1)
+            val activeStep = state.activeStep.takeIf { it > 0 } ?: (state.step + 1)
+            val stepPercent = (state.stepProgress.coerceIn(0f, 1f) * 100f).toInt()
+            Text("OPTIMIZER STEP", color = NexoraMuted, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        when {
+                            (running || paused) && activeStep > state.step -> "Step $activeStep / $stepTarget · sedang diproses"
+                            state.step > 0 -> "Step ${state.step} / $stepTarget · update bobot selesai"
+                            else -> "Step 1 / $stepTarget · belum ada update selesai"
+                        },
+                        color = NexoraOnSurface, fontSize = 13.sp, fontWeight = FontWeight.Bold
+                    )
+                    Text("Update bobot lengkap: ${state.step} dari $stepTarget", color = NexoraMuted, fontSize = 11.sp)
+                }
+                Text(
+                    if (running || paused) "$stepPercent%" else if (state.step > 0) "100%" else "0%",
+                    color = NexoraPrimary, fontSize = 19.sp, fontWeight = FontWeight.ExtraBold
+                )
+            }
+            LinearProgressIndicator(
+                progress = { if (running || paused) state.stepProgress.coerceIn(0f, 1f) else if (state.step > 0) 1f else 0f },
+                modifier = Modifier.fillMaxWidth(),
+                color = NexoraPrimary,
+                trackColor = NexoraSurfaceVar
+            )
+            Text(
+                "Step = satu update bobot setelah backpropagation + AdamW. Batch tetap ditampilkan terpisah di header epoch.",
+                color = NexoraMuted, fontSize = 11.sp
+            )
             if (running || paused) {
                 Text(
                     "Durasi tahap: ${fmtOperationMs(state.operationElapsedMs)} · bobot diperbarui ${state.step} kali",
                     color = NexoraOnSurface, fontSize = 12.sp, fontWeight = FontWeight.Medium
                 )
                 Text(
-                    "Kemajuan batch aktif: ${(state.batchProgress.coerceIn(0f, 1f) * 100f).toInt()}% · progress ini perkiraan tahap komputasi, bukan persentase bobot yang sudah diperbarui",
+                    "Kemajuan proses batch: ${(state.batchProgress.coerceIn(0f, 1f) * 100f).toInt()}% · panel OPTIMIZER STEP menunjukkan nomor update bobot dan progres step.",
                     color = NexoraMuted, fontSize = 11.sp
                 )
                 if (state.step == 0 && state.batchInEpoch > 0) {
