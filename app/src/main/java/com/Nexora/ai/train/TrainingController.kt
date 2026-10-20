@@ -182,6 +182,8 @@ object TrainingController {
             )
             return
         }
+        // Scope backend counters to this training run, not an earlier benchmark.
+        NativeOps.resetComputeStats()
         if (hp.numThreads > 0) NativeOps.nativeSetThreads(hp.numThreads) else NativeOps.nativeSetThreads(NativeOps.nativeCpuCores())
         stopped = false
         paused = false
