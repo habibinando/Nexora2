@@ -54,9 +54,16 @@ object MathUtil {
     }
 
     fun gradNorm(vararg grads: FloatArray): Float {
-        var s = 0f
-        for (g in grads) for (v in g) s += v * v
-        return sqrt(s)
+        // Float accumulation can overflow on large models even while individual gradients
+        // are finite. Double accumulation delays overflow and makes clipping more stable.
+        var sumSquares = 0.0
+        for (gradient in grads) {
+            for (value in gradient) {
+                val v = value.toDouble()
+                sumSquares += v * v
+            }
+        }
+        return sqrt(sumSquares).toFloat()
     }
 
     fun clipGradNorm(grads: List<FloatArray>, maxNorm: Float) {

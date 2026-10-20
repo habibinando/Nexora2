@@ -18,7 +18,9 @@ object Inference {
         model: GPT, tokenizer: Tokenizer, prompt: String,
         cfg: GenConfig = GenConfig(),
         onToken: (String) -> Unit = {}
-    ): String {
+    ): String = synchronized(model) {
+        // Training and inference share layer caches; keep a full generation session atomic
+        // with respect to training steps, not just each individual forward pass.
         val rng = Random(cfg.seed)
         var ctx = tokenizer.encode(prompt, addBos = true, addEos = false).toMutableList()
         val outIds = mutableListOf<Int>()
@@ -36,7 +38,7 @@ object Inference {
             // Emit the whole decoded prefix so UTF-8 byte-fallback tokens remain valid.
             onToken(tokenizer.decode(outIds.toIntArray()))
         }
-        return tokenizer.decode(outIds.toIntArray())
+        tokenizer.decode(outIds.toIntArray())
     }
 
     private fun sample(logits: FloatArray, offset: Int, vocab: Int, temp: Float, topK: Int, rng: Random): Int {

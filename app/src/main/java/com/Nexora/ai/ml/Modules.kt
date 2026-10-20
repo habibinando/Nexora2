@@ -7,17 +7,32 @@ import kotlin.random.Random
 
 data class ModelConfig(
     val vocabSize: Int = 16000,
-    val seqLen: Int = 128,
+    val seqLen: Int = 64,
     val dModel: Int = 128,
     val ffnDim: Int = 512,
     val numHeads: Int = 8,
-    val numLayers: Int = 32,
+    val numLayers: Int = 8,
     val dropout: Float = 0.1f,
-    val useLora: Boolean = true,
+    val useLora: Boolean = false,
     val loraRank: Int = 8,
     val loraAlpha: Int = 16,
     val layerNormEps: Float = 1e-5f
 ) {
+    init {
+        require(vocabSize in 260..65_536) { "vocabSize must be between 260 and 65536" }
+        require(seqLen in 16..512) { "seqLen must be between 16 and 512" }
+        require(dModel in 32..1024) { "dModel must be between 32 and 1024" }
+        require(ffnDim in 32..4096) { "ffnDim must be between 32 and 4096" }
+        require(numLayers in 1..64) { "numLayers must be between 1 and 64" }
+        require(numHeads in 1..32 && dModel % numHeads == 0) {
+            "numHeads must divide dModel exactly"
+        }
+        require(dropout.isFinite() && dropout in 0f..0.5f) { "dropout must be between 0 and 0.5" }
+        require(loraRank in 1..64) { "loraRank must be between 1 and 64" }
+        require(loraAlpha in 1..256) { "loraAlpha must be between 1 and 256" }
+        require(layerNormEps.isFinite() && layerNormEps > 0f) { "layerNormEps must be finite and positive" }
+    }
+
     val headDim: Int get() = dModel / numHeads
 }
 
@@ -74,7 +89,7 @@ class Linear(
         val x = cacheX!!
         if (!frozenBase) {
             // dW = x^T @ gy  (inF x T) @ (T x outF)
-            NativeOps.nativeMatMul(x, gy, wg, inF, T, outF, true, false, 1f, 1f)
+            NativeOps.matmulAccumulate(x, gy, wg, inF, T, outF, transA = true)
         }
         if (bg != null) {
             for (t in 0 until T) {
@@ -432,9 +447,13 @@ class GPT(val cfg: ModelConfig, val rng: Random = Random(1337)) {
             return n
         }
 
-    fun forward(tokens: IntArray, B: Int, S: Int, training: Boolean): FloatArray {
+    fun forward(
+        tokens: IntArray, B: Int, S: Int, training: Boolean,
+        onProgress: ((String) -> Unit)? = null
+    ): FloatArray {
         this.B = B; this.S = S; cacheTokens = tokens
         val T = B * S
+        onProgress?.invoke("Forward · embedding token dan posisi")
         var x = tokEmb.forward(tokens)
         for (t in 0 until T) {
             val pos = t % S
@@ -442,7 +461,11 @@ class GPT(val cfg: ModelConfig, val rng: Random = Random(1337)) {
             for (d in 0 until cfg.dModel) x[o + d] += posEmb[po + d]
         }
         x = drop.forward(x, training, rng)
-        for (block in blocks) x = block.forward(x, B, S, training, rng)
+        for ((index, block) in blocks.withIndex()) {
+            onProgress?.invoke("Forward · transformer layer ${index + 1}/${blocks.size}")
+            x = block.forward(x, B, S, training, rng)
+        }
+        onProgress?.invoke("Forward · norm akhir dan proyeksi logits")
         x = lnF.forward(x, T)
         cacheX = x
         // logits = x @ tokEmb.w^T (weight tying): x T x d, w vocab x d -> need w^T d x vocab
@@ -450,15 +473,20 @@ class GPT(val cfg: ModelConfig, val rng: Random = Random(1337)) {
     }
 
     /** gradLogits: T x vocab (already softmax-onehot scaled). Returns loss. */
-    fun backward(gradLogits: FloatArray): FloatArray {
+    fun backward(gradLogits: FloatArray, onProgress: ((String) -> Unit)? = null): FloatArray {
         val T = B * S; val d = cfg.dModel
         val x = cacheX!!
+        onProgress?.invoke("Backward · proyeksi output dan gradien embedding tertaut")
         // dX = gradLogits @ tokEmb.w  (T x vocab) @ (vocab x d)
         var dX = NativeOps.matmul(gradLogits, tokEmb.w, T, cfg.vocabSize, d)
         // tied weight grad: dW = gradLogits^T @ x  (vocab x T) @ (T x d)
-        NativeOps.nativeMatMul(gradLogits, x, tokEmb.wg, cfg.vocabSize, T, d, true, false, 1f, 1f)
+        NativeOps.matmulAccumulate(gradLogits, x, tokEmb.wg, cfg.vocabSize, T, d, transA = true)
         dX = lnF.backward(dX, T)
-        for (i in blocks.indices.reversed()) dX = blocks[i].backward(dX, T)
+        for (i in blocks.indices.reversed()) {
+            onProgress?.invoke("Backward · transformer layer ${i + 1}/${blocks.size}")
+            dX = blocks[i].backward(dX, T)
+        }
+        onProgress?.invoke("Backward · embedding dan gradien posisi")
         drop.backward(dX)
         // pos emb grad
         val tokens = cacheTokens!!

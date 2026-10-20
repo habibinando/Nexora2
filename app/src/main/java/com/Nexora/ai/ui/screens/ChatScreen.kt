@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -22,8 +23,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.Slider
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -32,6 +41,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -63,9 +74,15 @@ fun ChatScreen() {
     val state by TrainingController.state.collectAsState()
     val model = TrainingController.model
     val tokenizer = TrainingController.tokenizer
+    val modelReady = model != null && tokenizer != null
     val messages = remember { mutableStateListOf<Msg>() }
     var input by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
+    var temperature by remember { mutableFloatStateOf(0.8f) }
+    var maxTokens by remember { mutableIntStateOf(160) }
+    var topK by remember { mutableIntStateOf(40) }
+    val quickPrompts = listOf("Jelaskan cara kerja model bahasa", "Bantu periksa kode Kotlin", "Buat rencana training model")
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
 
@@ -109,6 +126,39 @@ fun ChatScreen() {
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Medium
                 )
+            }
+            IconButton(onClick = { showSettings = !showSettings }, enabled = modelReady && !busy) {
+                Icon(Icons.Filled.Tune, contentDescription = "Pengaturan respons", tint = NexoraPrimary)
+            }
+            IconButton(onClick = { if (!busy) messages.clear() }, enabled = messages.isNotEmpty() && !busy) {
+                Icon(Icons.Filled.DeleteSweep, contentDescription = "Bersihkan percakapan", tint = NexoraMuted)
+            }
+        }
+
+        if (showSettings && modelReady) {
+            Card(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                colors = CardDefaults.cardColors(containerColor = NexoraSurface),
+                shape = RoundedCornerShape(18.dp)
+            ) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Temperature", color = NexoraOnSurface, fontSize = 12.sp)
+                        Text("%.2f".format(temperature), color = NexoraPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Slider(value = temperature, onValueChange = { temperature = it }, valueRange = 0.2f..1.5f)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Token maksimum", color = NexoraOnSurface, fontSize = 12.sp)
+                        Text(maxTokens.toString(), color = NexoraPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Slider(value = maxTokens.toFloat(), onValueChange = { maxTokens = it.toInt() }, valueRange = 20f..256f, steps = 22)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Top-K sampling", color = NexoraOnSurface, fontSize = 12.sp)
+                        Text(topK.toString() + " kandidat", color = NexoraPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Slider(value = topK.toFloat(), onValueChange = { topK = it.toInt().coerceIn(1, 100) }, valueRange = 1f..100f, steps = 98)
+                    Text("Pengaturan ini mengubah cara token dipilih, bukan bobot model yang sudah dilatih.", color = NexoraMuted, fontSize = 11.sp)
+                }
             }
         }
 
@@ -193,6 +243,21 @@ fun ChatScreen() {
             }
         }
 
+        LazyRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(vertical = 4.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            items(quickPrompts, key = { it }) { prompt ->
+                FilterChip(
+                    selected = false,
+                    onClick = { if (!busy) input = prompt },
+                    label = { Text(prompt, fontSize = 11.sp) },
+                    colors = FilterChipDefaults.filterChipColors(containerColor = NexoraSurface)
+                )
+            }
+        }
+        if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         Row(
             modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 10.dp),
             verticalAlignment = Alignment.Bottom
@@ -231,7 +296,7 @@ fun ChatScreen() {
                                         model,
                                         tokenizer,
                                         prompt,
-                                        Inference.GenConfig(maxNewTokens = 160)
+                                        Inference.GenConfig(maxNewTokens = maxTokens, temperature = temperature, topK = topK)
                                     ) { prefix ->
                                         // The inference engine sends the decoded prefix for UTF-8 safety.
                                         assistant.text = prefix

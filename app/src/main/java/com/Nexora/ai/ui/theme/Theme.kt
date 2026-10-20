@@ -1,44 +1,66 @@
 package com.Nexora.ai.ui.theme
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 
-// Nexora 2026 visual identity: deep-space dark, teal-cyan accent, warm amber highlight.
-val NexoraBg = Color(0xFF070B12)
-val NexoraSurface = Color(0xFF0E1520)
-val NexoraSurfaceVar = Color(0xFF16202E)
-val NexoraPrimary = Color(0xFF2DD4BF)
-val NexoraCyan = Color(0xFF22D3EE)
-val NexoraAmber = Color(0xFFFBBF24)
-val NexoraOnSurface = Color(0xFFE6EDF3)
-val NexoraMuted = Color(0xFF64748B)
-val NexoraDanger = Color(0xFFFB7185)
+// Visual identity ported from the original Nexora project.
+val CyberBackground = Color(0xFF090D16)
+val CyberSurface = Color(0xFF111827)
+val CyberSurfaceVariant = Color(0xFF1E293B)
+val CyberSurfaceCard = Color(0xFF161F30)
 
-val AccentGradient: Brush = Brush.horizontalGradient(listOf(NexoraPrimary, NexoraCyan))
-val AccentGradientVertical: Brush = Brush.verticalGradient(listOf(NexoraPrimary, NexoraCyan))
+val ElectricCyan = Color(0xFF00E5FF)
+val ElectricCyanDark = Color(0xFF00B0FF)
+val NeonPurple = Color(0xFFA855F7)
+val DeepViolet = Color(0xFF7C3AED)
+val NeuralGreen = Color(0xFF10B981)
+val AccentOrange = Color(0xFFF97316)
+val DangerRed = Color(0xFFEF4444)
+
+val TextPrimary = Color(0xFFF8FAFC)
+val TextSecondary = Color(0xFF94A3B8)
+val TextTertiary = Color(0xFF64748B)
+val BorderSubtle = Color(0xFF334155)
+val GlowBorder = Color(0x3300E5FF)
+
+// Compatibility aliases keep the existing Nexora2 screens compiling.
+val NexoraBg = CyberBackground
+val NexoraSurface = CyberSurface
+val NexoraSurfaceVar = CyberSurfaceVariant
+val NexoraPrimary = ElectricCyan
+val NexoraCyan = ElectricCyan
+val NexoraAmber = AccentOrange
+val NexoraOnSurface = TextPrimary
+val NexoraMuted = TextSecondary
+val NexoraDanger = DangerRed
+
+val AccentGradient: Brush = Brush.horizontalGradient(listOf(ElectricCyan, NeonPurple))
+val AccentGradientVertical: Brush = Brush.verticalGradient(listOf(ElectricCyan, NeonPurple))
 
 private val DarkScheme = darkColorScheme(
-    primary = NexoraPrimary,
-    onPrimary = Color(0xFF041410),
-    secondary = NexoraAmber,
-    onSecondary = Color(0xFF1A1200),
-    background = NexoraBg,
-    surface = NexoraSurface,
-    surfaceVariant = NexoraSurfaceVar,
-    onBackground = NexoraOnSurface,
-    onSurface = NexoraOnSurface,
-    onSurfaceVariant = NexoraMuted,
-    error = NexoraDanger,
-    primaryContainer = Color(0xFF0E3A33),
-    onPrimaryContainer = NexoraPrimary
+    primary = ElectricCyan,
+    onPrimary = Color.Black,
+    secondary = NeonPurple,
+    onSecondary = Color.White,
+    tertiary = NeuralGreen,
+    background = CyberBackground,
+    surface = CyberSurface,
+    surfaceVariant = CyberSurfaceVariant,
+    onBackground = TextPrimary,
+    onSurface = TextPrimary,
+    onSurfaceVariant = TextSecondary,
+    outline = BorderSubtle,
+    error = DangerRed,
+    primaryContainer = DeepViolet,
+    onPrimaryContainer = Color.White,
+    secondaryContainer = CyberSurfaceVariant,
+    onSecondaryContainer = ElectricCyan
 )
 
 @Composable
 fun NexoraTheme(content: @Composable () -> Unit) {
-    // Nexora is always dark (2026 OLED-first aesthetic).
     MaterialTheme(colorScheme = DarkScheme, content = content)
 }

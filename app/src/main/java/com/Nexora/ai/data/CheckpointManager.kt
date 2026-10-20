@@ -5,6 +5,8 @@ import com.Nexora.ai.ml.ModelConfig
 import com.Nexora.ai.ml.AdamW
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -16,36 +18,94 @@ import java.io.FileOutputStream
  */
 class CheckpointManager(private val dir: File) {
 
-    init { dir.mkdirs() }
+    companion object {
+        private const val META_MAGIC = 0x4E584D31
+        private const val META_VERSION = 2
+    }
+
+    init {
+        val parent = dir.parentFile
+        if (parent != null) {
+            parent.mkdirs()
+            val staging = File(parent, dir.name + ".staging")
+            val backup = File(parent, dir.name + ".backup")
+            // Recover the prior complete checkpoint if the process died mid-swap.
+            if (!dir.exists() && backup.exists()) backup.renameTo(dir)
+            if (staging.exists()) staging.deleteRecursively()
+            if (dir.exists() && backup.exists()) backup.deleteRecursively()
+        }
+        dir.mkdirs()
+    }
 
     data class Meta(
         val step: Int, val epoch: Int, val bestValLoss: Float,
         val patienceCount: Int, val lossHistory: List<Float>,
-        val tokensSeen: Long
+        val tokensSeen: Long,
+        val datasetFingerprint: String = ""
     )
 
     fun save(model: GPT, optimizer: AdamW, tokenizer: Tokenizer, meta: Meta) {
-        DataOutputStream(FileOutputStream(File(dir, "config.bin"))).use { o ->
-            val c = model.cfg
-            o.writeInt(c.vocabSize); o.writeInt(c.seqLen); o.writeInt(c.dModel); o.writeInt(c.ffnDim)
-            o.writeInt(c.numHeads); o.writeInt(c.numLayers); o.writeFloat(c.dropout)
-            o.writeBoolean(c.useLora); o.writeInt(c.loraRank); o.writeInt(c.loraAlpha); o.writeFloat(c.layerNormEps)
+        val parent = dir.parentFile ?: throw IllegalStateException("Checkpoint directory has no parent")
+        if (!parent.exists() && !parent.mkdirs()) {
+            throw IllegalStateException("Cannot create checkpoint parent directory")
         }
-        DataOutputStream(FileOutputStream(File(dir, "tokenizer.bin"))).use { tokenizer.save(it) }
-        DataOutputStream(FileOutputStream(File(dir, "tensors.bin"))).use { o ->
-            for (t in model.allTensors()) { o.writeInt(t.size); for (v in t) o.writeFloat(v) }
-        }
-        DataOutputStream(FileOutputStream(File(dir, "optimizer.bin"))).use { o ->
-            o.writeInt(optimizer.step)
-            for ((m, v) in optimizer.state()) {
-                o.writeInt(m.size); for (x in m) o.writeFloat(x)
-                o.writeInt(v.size); for (x in v) o.writeFloat(x)
+        val staging = File(parent, dir.name + ".staging")
+        val backup = File(parent, dir.name + ".backup")
+        staging.deleteRecursively()
+        if (!staging.mkdirs()) throw IllegalStateException("Cannot create checkpoint staging directory")
+
+        try {
+            DataOutputStream(BufferedOutputStream(FileOutputStream(File(staging, "config.bin")), 1 shl 20)).use { output ->
+                val config = model.cfg
+                output.writeInt(config.vocabSize); output.writeInt(config.seqLen)
+                output.writeInt(config.dModel); output.writeInt(config.ffnDim)
+                output.writeInt(config.numHeads); output.writeInt(config.numLayers)
+                output.writeFloat(config.dropout)
+                output.writeBoolean(config.useLora); output.writeInt(config.loraRank)
+                output.writeInt(config.loraAlpha); output.writeFloat(config.layerNormEps)
             }
-        }
-        DataOutputStream(FileOutputStream(File(dir, "meta.bin"))).use { o ->
-            o.writeInt(meta.step); o.writeInt(meta.epoch); o.writeFloat(meta.bestValLoss)
-            o.writeInt(meta.patienceCount); o.writeLong(meta.tokensSeen)
-            o.writeInt(meta.lossHistory.size); for (l in meta.lossHistory) o.writeFloat(l)
+            DataOutputStream(BufferedOutputStream(FileOutputStream(File(staging, "tokenizer.bin")), 1 shl 20)).use {
+                tokenizer.save(it)
+            }
+            DataOutputStream(BufferedOutputStream(FileOutputStream(File(staging, "tensors.bin")), 1 shl 20)).use { output ->
+                for (tensor in model.allTensors()) {
+                    output.writeInt(tensor.size)
+                    for (value in tensor) output.writeFloat(value)
+                }
+            }
+            DataOutputStream(BufferedOutputStream(FileOutputStream(File(staging, "optimizer.bin")), 1 shl 20)).use { output ->
+                output.writeInt(optimizer.step)
+                for ((firstMoment, secondMoment) in optimizer.state()) {
+                    output.writeInt(firstMoment.size)
+                    for (value in firstMoment) output.writeFloat(value)
+                    output.writeInt(secondMoment.size)
+                    for (value in secondMoment) output.writeFloat(value)
+                }
+            }
+            DataOutputStream(BufferedOutputStream(FileOutputStream(File(staging, "meta.bin")), 1 shl 20)).use { output ->
+                output.writeInt(META_MAGIC); output.writeInt(META_VERSION)
+                output.writeInt(meta.step); output.writeInt(meta.epoch); output.writeFloat(meta.bestValLoss)
+                output.writeInt(meta.patienceCount); output.writeLong(meta.tokensSeen)
+                output.writeUTF(meta.datasetFingerprint)
+                output.writeInt(meta.lossHistory.size)
+                for (loss in meta.lossHistory) output.writeFloat(loss)
+            }
+
+            // Swap the whole directory only after every checkpoint file has closed successfully.
+            backup.deleteRecursively()
+            val hadPrevious = dir.exists()
+            if (hadPrevious && !dir.renameTo(backup)) {
+                throw IllegalStateException("Cannot move previous checkpoint to backup")
+            }
+            if (!staging.renameTo(dir)) {
+                if (hadPrevious && backup.exists()) backup.renameTo(dir)
+                throw IllegalStateException("Cannot publish complete checkpoint")
+            }
+            backup.deleteRecursively()
+        } catch (failure: Throwable) {
+            staging.deleteRecursively()
+            if (!dir.exists() && backup.exists()) backup.renameTo(dir)
+            throw failure
         }
     }
 
@@ -55,7 +115,7 @@ class CheckpointManager(private val dir: File) {
         val f = File(dir, "config.bin")
         if (!f.exists()) return null
         return try {
-            DataInputStream(FileInputStream(f)).use { i ->
+            DataInputStream(BufferedInputStream(FileInputStream(f), 1 shl 20)).use { i ->
                 ModelConfig(
                     vocabSize = i.readInt(), seqLen = i.readInt(), dModel = i.readInt(),
                     ffnDim = i.readInt(), numHeads = i.readInt(), numLayers = i.readInt(),
@@ -67,11 +127,11 @@ class CheckpointManager(private val dir: File) {
     }
 
     fun loadTokenizer(): Tokenizer? = try {
-        DataInputStream(FileInputStream(File(dir, "tokenizer.bin"))).use { Tokenizer.load(it) }
+        DataInputStream(BufferedInputStream(FileInputStream(File(dir, "tokenizer.bin")), 1 shl 20)).use { Tokenizer.load(it) }
     } catch (_: Exception) { null }
 
     fun loadTensors(model: GPT): Boolean = try {
-        DataInputStream(FileInputStream(File(dir, "tensors.bin"))).use { i ->
+        DataInputStream(BufferedInputStream(FileInputStream(File(dir, "tensors.bin")), 1 shl 20)).use { i ->
             for (t in model.allTensors()) {
                 val n = i.readInt()
                 require(n == t.size)
@@ -82,25 +142,58 @@ class CheckpointManager(private val dir: File) {
     } catch (_: Exception) { false }
 
     fun loadOptimizerState(optimizer: AdamW): Pair<Int, List<Pair<FloatArray, FloatArray>>>? = try {
-        DataInputStream(FileInputStream(File(dir, "optimizer.bin"))).use { i ->
-            val step = i.readInt()
-            val state = optimizer.state().map { (m, v) ->
-                val nm = FloatArray(i.readInt()) { i.readFloat() }
-                val nv = FloatArray(i.readInt()) { i.readFloat() }
-                nm to nv
+        DataInputStream(BufferedInputStream(FileInputStream(File(dir, "optimizer.bin")), 1 shl 20)).use { input ->
+            val step = input.readInt()
+            require(step >= 0) { "Invalid optimizer step" }
+            val expected = optimizer.state()
+            val restored = ArrayList<Pair<FloatArray, FloatArray>>(expected.size)
+            for ((mExpected, vExpected) in expected) {
+                val nmSize = input.readInt()
+                require(nmSize == mExpected.size) { "Optimizer first-moment tensor size mismatch" }
+                val nm = FloatArray(nmSize) { input.readFloat() }
+                val nvSize = input.readInt()
+                require(nvSize == vExpected.size) { "Optimizer second-moment tensor size mismatch" }
+                val nv = FloatArray(nvSize) { input.readFloat() }
+                restored += nm to nv
             }
-            step to state
+            require(input.read() == -1) { "Unexpected trailing optimizer checkpoint data" }
+            step to restored
         }
     } catch (_: Exception) { null }
 
     fun loadMeta(): Meta? = try {
-        DataInputStream(FileInputStream(File(dir, "meta.bin"))).use { i ->
-            val step = i.readInt(); val epoch = i.readInt(); val best = i.readFloat()
-            val patience = i.readInt(); val tokens = i.readLong()
-            val n = i.readInt(); val hist = List(n) { i.readFloat() }
-            Meta(step, epoch, best, patience, hist, tokens)
+        DataInputStream(BufferedInputStream(FileInputStream(File(dir, "meta.bin")), 1 shl 20)).use { input ->
+            val marker = input.readInt()
+            val versioned = marker == META_MAGIC
+            val version = if (versioned) input.readInt() else 0
+            require(!versioned || version in 1..META_VERSION) { "Unsupported checkpoint metadata version" }
+            val step = if (versioned) input.readInt() else marker
+            val storedEpoch = input.readInt()
+            val best = input.readFloat()
+            val patience = input.readInt()
+            val tokens = input.readLong()
+            val fingerprint = if (versioned && version >= 2) input.readUTF() else ""
+            val count = input.readInt()
+
+            // Very old checkpoints wrote optimizer step into both step and epoch.
+            // Their epoch count is unknowable, so resume weights but restart the epoch schedule.
+            val epoch = if (!versioned && step > 0 && storedEpoch == step) 0 else storedEpoch
+            require(step >= 0 && epoch >= 0 && patience >= 0 && tokens >= 0L)
+            require(count in 0..500) { "Invalid loss history size" }
+            val history = List(count) { input.readFloat().also { loss -> require(loss.isFinite()) } }
+            require(best.isFinite() || best == Float.MAX_VALUE)
+            require(input.read() == -1) { "Unexpected trailing checkpoint metadata" }
+            Meta(step, epoch, best, patience, history, tokens, fingerprint)
         }
     } catch (_: Exception) { null }
 
-    fun clear() { dir.listFiles()?.forEach { it.delete() } }
+    fun clear() {
+        val parent = dir.parentFile
+        dir.deleteRecursively()
+        if (parent != null) {
+            File(parent, dir.name + ".staging").deleteRecursively()
+            File(parent, dir.name + ".backup").deleteRecursively()
+        }
+        dir.mkdirs()
+    }
 }

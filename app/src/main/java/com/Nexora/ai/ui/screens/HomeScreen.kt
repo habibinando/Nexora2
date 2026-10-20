@@ -10,24 +10,29 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import com.Nexora.ai.ml.NativeOps
 import com.Nexora.ai.train.TrainingController
+import com.Nexora.ai.train.Phase
+import com.Nexora.ai.ui.AppSettings
 import com.Nexora.ai.ui.components.GlassCard
 import com.Nexora.ai.ui.components.GradientLabel
 import com.Nexora.ai.ui.components.KeyValueRow
 import com.Nexora.ai.ui.components.LossChart
 import com.Nexora.ai.ui.components.SectionTitle
 import com.Nexora.ai.ui.theme.NexoraAmber
+import com.Nexora.ai.ui.theme.NexoraDanger
 import com.Nexora.ai.ui.theme.NexoraMuted
 import com.Nexora.ai.ui.theme.NexoraOnSurface
 import com.Nexora.ai.ui.theme.NexoraPrimary
@@ -35,6 +40,21 @@ import com.Nexora.ai.ui.theme.NexoraPrimary
 @Composable
 fun HomeScreen(nav: NavController) {
     val s by TrainingController.state.collectAsState()
+    val hp by AppSettings.hp.collectAsState()
+    val runProgress = (s.currentEpoch - 1).coerceAtLeast(0) +
+        if (s.batchesInEpoch > 0) s.batchInEpoch.toFloat() / s.batchesInEpoch else 0f
+    val targetReached = s.epoch >= hp.epochs && s.numTokens > 0
+    val progress = if (targetReached) 1f else (runProgress / hp.epochs.coerceAtLeast(1)).coerceIn(0f, 1f)
+    val displayEpoch = if (s.currentEpoch <= s.epoch && s.epoch < hp.epochs) s.epoch + 1
+        else maxOf(s.currentEpoch, s.epoch)
+    val phaseColor = when (s.phase) {
+        Phase.RUNNING -> Color(0xFF10B981)
+        Phase.PAUSED, Phase.IMPORTING -> NexoraAmber
+        Phase.ERROR -> NexoraDanger
+        Phase.FINISHED, Phase.EARLY_STOPPED -> Color(0xFF10B981)
+        Phase.READY -> NexoraPrimary
+        Phase.IDLE -> NexoraMuted
+    }
     Column(
         Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -44,20 +64,42 @@ fun HomeScreen(nav: NavController) {
             color = NexoraMuted, fontSize = 13.sp, modifier = Modifier.padding(bottom = 8.dp))
 
         GlassCard {
-            KeyValueRow("Status", s.phase.name)
-            KeyValueRow("Pesan", s.message.take(60))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Column(Modifier.weight(1f)) {
+                    Text("STATUS MODEL", color = NexoraMuted, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                    Text(s.phase.name.replace('_', ' '), color = phaseColor, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                }
+                Text(if (s.totalParams > 0) "%,d".format(s.totalParams) else "Model belum dibuat", color = NexoraOnSurface, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+            }
+            if (s.numTokens > 0) {
+                LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth(), color = phaseColor)
+                KeyValueRow(
+                    "Progres training",
+                    "Epoch " + displayEpoch + " / " + hp.epochs +
+                        if (s.batchesInEpoch > 0) " · batch ${s.batchInEpoch}/${s.batchesInEpoch}" else ""
+                )
+                KeyValueRow("Loss", if (s.loss.isFinite()) "%.5f".format(s.loss) else "Belum ada step")
+                KeyValueRow("Validation loss", if (s.valLoss.isFinite()) "%.5f".format(s.valLoss) else "Belum dievaluasi")
+            }
+            Text(s.message.ifBlank { "Impor dataset untuk mulai membuat model." }, color = NexoraMuted, fontSize = 12.sp)
             if (s.totalParams > 0) {
-                KeyValueRow("Total parameter", "%,d".format(s.totalParams))
-                KeyValueRow("Trainable (LoRA + emb + norm)", "%,d".format(s.trainableParams))
-                KeyValueRow("Vocab", "%,d".format(s.vocabSize))
+                KeyValueRow("Parameter trainable", "%,d".format(s.trainableParams))
+                KeyValueRow("Vocabulary", "%,d".format(s.vocabSize))
                 KeyValueRow("Token corpus", "%,d".format(s.numTokens))
             }
-            KeyValueRow("CPU core aktif", NativeOps.nativeCpuCores().toString())
+            KeyValueRow("CPU core tersedia", NativeOps.nativeCpuCores().toString())
+            KeyValueRow("GEMM CPU / GPU", NativeOps.computeStats().cpuGemmCalls.toString() + " / " + NativeOps.computeStats().gpuGemmCalls)
         }
 
-        if (s.lossHistory.size > 1) {
-            SectionTitle("Kurva loss terbaru")
-            GlassCard { LossChart(s.lossHistory) }
+        SectionTitle("Kurva loss terbaru")
+        GlassCard {
+            if (s.lossHistory.size > 1) {
+                LossChart(s.lossHistory)
+                KeyValueRow("Loss terbaru", "%.5f".format(s.lossHistory.last()))
+                KeyValueRow("Jumlah titik", s.lossHistory.size.toString())
+            } else {
+                Text("Belum ada grafik. Kurva akan terbentuk setelah lebih dari satu step training selesai.", color = NexoraMuted, fontSize = 12.sp)
+            }
         }
 
         SectionTitle("Mulai cepat")

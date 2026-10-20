@@ -37,6 +37,8 @@ import androidx.compose.ui.unit.sp
 import com.Nexora.ai.benchmark.BenchmarkResult
 import com.Nexora.ai.benchmark.BenchmarkRunner
 import com.Nexora.ai.ml.NativeOps
+import com.Nexora.ai.system.DeviceDiagnostics
+import com.Nexora.ai.system.DeviceModelAdvisor
 import com.Nexora.ai.train.Phase
 import com.Nexora.ai.train.TrainingController
 import com.Nexora.ai.ui.AppSettings
@@ -64,20 +66,141 @@ fun LabScreen() {
     var benchError by remember { mutableStateOf<String?>(null) }
     var benchResult by remember { mutableStateOf<BenchmarkResult?>(null) }
     var gpuInfo by remember { mutableStateOf("GPU belum diperiksa") }
+    var deviceReport by remember { mutableStateOf<DeviceDiagnostics.Report?>(null) }
+    var deviceInfoBusy by remember { mutableStateOf(false) }
     var confirmReset by remember { mutableStateOf(false) }
     var headsExpanded by remember { mutableStateOf(false) }
 
-    LaunchedEffect(Unit) { gpuInfo = withContext(Dispatchers.IO) { NativeOps.gpuInfo() } }
+    LaunchedEffect(Unit) {
+        deviceInfoBusy = true
+        try {
+            deviceReport = withContext(Dispatchers.IO) { DeviceDiagnostics.read(context) }
+            gpuInfo = withContext(Dispatchers.IO) { NativeOps.gpuInfo() }
+        } finally {
+            deviceInfoBusy = false
+        }
+    }
     val validHeads = (2..16).filter { cfg.dModel % it == 0 }.ifEmpty { listOf(1) }
+    val resetAllowed = !benchBusy &&
+        train.phase !in setOf(Phase.RUNNING, Phase.PAUSED, Phase.IMPORTING)
 
     Column(
         Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         GradientLabel("Lab • Benchmark & Setelan")
+
+        SectionTitle("Deteksi hardware aktual")
+        Text(
+            "Data dibaca dari Android/kernel dan Vulkan driver perangkat ini. RAM tersedia berubah-ubah; RAM tambahan/virtual dari fitur ekspansi OEM tidak dihitung sebagai RAM fisik.",
+            color = NexoraMuted, fontSize = 12.sp
+        )
+        OutlinedButton(
+            onClick = {
+                scope.launch {
+                    deviceInfoBusy = true
+                    try {
+                        deviceReport = withContext(Dispatchers.IO) { DeviceDiagnostics.read(context) }
+                        gpuInfo = withContext(Dispatchers.IO) { NativeOps.gpuInfo() }
+                    } finally {
+                        deviceInfoBusy = false
+                    }
+                }
+            },
+            enabled = !deviceInfoBusy,
+            modifier = Modifier.fillMaxWidth()
+        ) { Text(if (deviceInfoBusy) "Membaca perangkat…" else "Perbarui deteksi perangkat") }
+
+        deviceReport?.let { d ->
+            GlassCard {
+                KeyValueRow("Perangkat", d.device)
+                KeyValueRow("Android", d.androidVersion)
+                KeyValueRow("SoC / hardware", d.soc)
+                KeyValueRow("Identifikasi CPU", d.cpuDescription)
+                KeyValueRow("Core terlihat Android", d.cpuCoresRuntime.toString())
+                KeyValueRow("Core dilaporkan native", d.cpuCoresNative.toString())
+                KeyValueRow("ABI yang didukung", d.supportedAbis)
+                KeyValueRow("Frekuensi maksimum core", d.cpuFrequency)
+                KeyValueRow("RAM fisik kernel", DeviceDiagnostics.formatBytes(d.totalRamBytes))
+                if (d.advertisedRamBytes != null) {
+                    KeyValueRow("RAM yang diiklankan OEM", DeviceDiagnostics.formatBytes(d.advertisedRamBytes))
+                }
+                KeyValueRow("RAM tersedia sekarang", DeviceDiagnostics.formatBytes(d.availableRamBytes))
+                KeyValueRow("Kondisi low-memory OS", if (d.lowMemory) "Ya" else "Tidak")
+                KeyValueRow("Batas Java heap aplikasi", DeviceDiagnostics.formatBytes(d.appHeapMaxBytes))
+                KeyValueRow("Java heap terpakai", DeviceDiagnostics.formatBytes(d.appHeapUsedBytes))
+                KeyValueRow("Memory class / large heap", "${d.memoryClassMb} / ${d.largeMemoryClassMb} MiB")
+                KeyValueRow("Status termal Android", d.thermalStatus)
+            }
+        }
+
+        deviceReport?.let { d ->
+            val advice = DeviceModelAdvisor.recommend(d, gpuInfo)
+            SectionTitle("Rekomendasi model & training")
+            GlassCard {
+                Text(advice.profileName, color = NexoraPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Text(advice.reason, color = NexoraMuted, fontSize = 12.sp)
+                KeyValueRow(
+                    "Model",
+                    "vocab ${advice.model.vocabSize} · dModel ${advice.model.dModel} · FFN ${advice.model.ffnDim}"
+                )
+                KeyValueRow(
+                    "Arsitektur",
+                    "${advice.model.numLayers} layer · ${advice.model.numHeads} heads · context ${advice.model.seqLen}"
+                )
+                KeyValueRow("Parameter perkiraan", "%,d".format(BenchmarkRunner.estimateParameterCount(advice.model)))
+                KeyValueRow("Batch size", advice.training.batchSize.toString())
+                KeyValueRow("Epoch awal", advice.training.epochs.toString())
+                KeyValueRow("Learning rate", "%.2e".format(advice.training.learningRate))
+                KeyValueRow("Thread CPU", advice.training.numThreads.toString())
+                KeyValueRow("Validasi / simpan", "${advice.training.evalEvery} / ${advice.training.saveEvery} step")
+                advice.notes.forEach { note ->
+                    Text("• $note", color = NexoraMuted, fontSize = 11.sp)
+                }
+                Text(
+                    "Terapkan hanya mengubah setelan. Arsitektur baru digunakan saat impor dataset berikutnya; checkpoint aktif tidak diubah otomatis.",
+                    color = NexoraOnSurface, fontSize = 11.sp
+                )
+                Button(
+                    onClick = {
+                        AppSettings.updateModel { advice.model }
+                        AppSettings.updateHp { advice.training }
+                    },
+                    enabled = resetAllowed,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = NexoraPrimary,
+                        contentColor = androidx.compose.ui.graphics.Color.Black
+                    )
+                ) {
+                    Text("Terapkan rekomendasi perangkat", fontWeight = FontWeight.Bold)
+                }
+                if (!resetAllowed) {
+                    Text(
+                        "Hentikan training/impor/benchmark dahulu untuk mengubah rekomendasi.",
+                        color = NexoraMuted, fontSize = 11.sp
+                    )
+                }
+            }
+        }
+
+        SectionTitle("Vulkan driver dan penggunaan aktual")
+        GlassCard {
+            KeyValueRow("GPU/Vulkan", gpuInfo)
+            val compute = NativeOps.computeStats()
+            KeyValueRow("GEMM Vulkan berhasil", compute.gpuGemmCalls.toString())
+            KeyValueRow("GEMM CPU", compute.cpuGemmCalls.toString())
+            KeyValueRow("Fallback Vulkan → CPU", compute.gpuFallbacks.toString())
+            KeyValueRow("Ambang GEMM GPU", "${NativeOps.GPU_GEMM_MIN_WORK} operasi perkalian-akumulasi")
+            Text(
+                "Versi API Vulkan yang didukung GPU ditampilkan terpisah dari versi fitur yang dipakai aplikasi. Nexora hanya mengirim GEMM besar ke Vulkan setelah tes akurasi; attention, backpropagation, optimizer, dan operasi lain masih menggunakan CPU. Nol GEMM Vulkan berarti belum ada operasi yang sukses melewati jalur GPU pada hitungan saat ini.",
+                color = NexoraMuted, fontSize = 11.sp
+            )
+        }
+
         SectionTitle("Benchmark CPU/GPU")
         Text(
-            "Tes CPU 512×512 dan GPU 512×512 dijalankan terpisah. Mini-training mengukur panggilan GEMM CPU/GPU yang benar-benar terjadi. Benchmark memakai CPU intensif; jangan jalankan bersamaan dengan training.",
+            "Tes CPU 512×512 dan Vulkan compute 512×512 dijalankan terpisah. Mini-training menghitung GEMM CPU/Vulkan yang benar-benar sukses setelah uji akurasi. Benchmark membebani perangkat; jangan jalankan bersamaan dengan training.",
             color = NexoraMuted, fontSize = 12.sp
         )
         Button(
@@ -125,7 +248,7 @@ fun LabScreen() {
                 KeyValueRow("Android", r.androidVersion)
                 KeyValueRow("CPU thread tersedia", "${r.cpuCores}")
                 KeyValueRow("CPU GEMM 512×512", "%.2f GFLOPS · %.2f ms".format(r.cpuGflops, r.cpuMsPerMatMul))
-                KeyValueRow("GPU tersedia", if (r.gpuAvailable) "Ya — GLES compute aktif" else "Tidak — GEMM besar fallback CPU")
+                KeyValueRow("GPU tersedia", if (r.gpuAvailable) "Ya — Vulkan compute aktif" else "Tidak — GEMM besar fallback CPU")
                 KeyValueRow("GPU GEMM 512×512", if (r.gpuMsPerMatMul > 0) "%.2f GFLOPS · %.2f ms".format(r.gpuGflops, r.gpuMsPerMatMul) else "Tidak dijalankan")
                 KeyValueRow("Mini-training step", "%.2f ms · %.1f token/detik".format(r.stepMsPerStep, r.tokensPerSec))
                 KeyValueRow("Loss mini-training", "%.5f".format(r.stepLoss))
@@ -137,8 +260,6 @@ fun LabScreen() {
                 KeyValueRow("RAM total / tersedia", "${r.ramTotalMb} MB / ${r.ramAvailMb} MB")
             }
         }
-        Text("Info backend GPU: $gpuInfo", color = NexoraMuted, fontSize = 11.sp)
-
         SectionTitle("Arsitektur model")
         Text(
             "Pengaturan ini digunakan saat impor dataset berikutnya. Mengubahnya tidak mengubah bobot model atau checkpoint aktif. Dimensi embedding dibuat kelipatan 8 dan attention heads dibatasi ke pembagi yang valid.",
@@ -188,6 +309,11 @@ fun LabScreen() {
                     onCheckedChange = { enabled -> AppSettings.updateModel { c -> c.copy(useLora = enabled) } }
                 )
             }
+            Text(
+                "Training dari nol: biarkan LoRA mati agar seluruh bobot linear belajar. LoRA membekukan bobot dasar dan baru cocok bila model dasar yang kompatibel sudah terlatih.",
+                color = NexoraMuted,
+                fontSize = 11.sp
+            )
             if (cfg.useLora) {
                 IntSlider("LoRA rank", cfg.loraRank, 1..32) { AppSettings.updateModel { c -> c.copy(loraRank = it) } }
                 IntSlider("LoRA alpha", cfg.loraAlpha, 4..64) { AppSettings.updateModel { c -> c.copy(loraAlpha = it) } }
@@ -199,10 +325,18 @@ fun LabScreen() {
         SectionTitle("Penyimpanan model")
         OutlinedButton(
             onClick = { confirmReset = true },
+            enabled = resetAllowed,
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.outlinedButtonColors(contentColor = NexoraDanger)
         ) { Text("Hapus checkpoint & reset model") }
-        Text("Ini menghapus bobot, optimizer state, tokenizer, dan metadata checkpoint. Dataset sumber tidak dihapus.", color = NexoraMuted, fontSize = 11.sp)
+        Text(
+            if (resetAllowed)
+                "Ini menghapus bobot, optimizer state, tokenizer, dan metadata checkpoint. Dataset sumber tidak dihapus."
+            else
+                "Reset dinonaktifkan saat training, impor dataset, atau benchmark aktif.",
+            color = NexoraMuted,
+            fontSize = 11.sp
+        )
     }
 
     if (confirmReset) {
@@ -211,7 +345,7 @@ fun LabScreen() {
             title = { Text("Hapus checkpoint?") },
             text = { Text("Bobot hasil training dan metadata akan dihapus. Tindakan ini tidak bisa dibatalkan.") },
             confirmButton = {
-                TextButton(onClick = {
+                TextButton(enabled = resetAllowed, onClick = {
                     TrainingController.clearCheckpoint()
                     benchResult = null
                     confirmReset = false

@@ -1,5 +1,5 @@
 // Nexora native compute core — real, no mock.
-// Optimized CPU: ARM NEON + pthread pool. GPU path in gles_compute.cpp.
+// Optimized CPU: ARM NEON + pthread pool. GPU compute path in vulkan_compute.cpp.
 #include <jni.h>
 #include <cstdint>
 #include <cstring>
@@ -156,14 +156,33 @@ Java_com_Nexora_ai_ml_NativeOps_jniMatMul(
         JNIEnv* env, jclass, jfloatArray aArr, jfloatArray bArr, jfloatArray cArr,
         jint M, jint K, jint N, jboolean transA, jboolean transB,
         jfloat alpha, jfloat beta) {
+    if (M <= 0 || K <= 0 || N <= 0 || aArr == nullptr || bArr == nullptr || cArr == nullptr) return;
+    const jlong aNeed = static_cast<jlong>(M) * K;
+    const jlong bNeed = static_cast<jlong>(K) * N;
+    const jlong cNeed = static_cast<jlong>(M) * N;
+    if (env->GetArrayLength(aArr) < aNeed ||
+        env->GetArrayLength(bArr) < bNeed ||
+        env->GetArrayLength(cArr) < cNeed) return;
+
     if (!g_pool_started) {
         Java_com_Nexora_ai_ml_NativeOps_nativeSetThreads(env, nullptr, 0);
     }
     float* A = env->GetFloatArrayElements(aArr, nullptr);
+    if (A == nullptr) return;
     float* B = env->GetFloatArrayElements(bArr, nullptr);
+    if (B == nullptr) {
+        env->ReleaseFloatArrayElements(aArr, A, JNI_ABORT);
+        return;
+    }
     float* C = env->GetFloatArrayElements(cArr, nullptr);
+    if (C == nullptr) {
+        env->ReleaseFloatArrayElements(aArr, A, JNI_ABORT);
+        env->ReleaseFloatArrayElements(bArr, B, JNI_ABORT);
+        return;
+    }
+
     GemmArg arg{A, B, C, M, K, N, transA != JNI_FALSE, transB != JNI_FALSE, alpha, beta};
-    long long work = (long long)M * K * N;
+    long long work = static_cast<long long>(M) * K * N;
     if (work < (1LL << 18) || g_num_threads <= 1) {
         gemm_worker(0, 1, &arg);
     } else {
@@ -179,7 +198,9 @@ Java_com_Nexora_ai_ml_NativeOps_jniMatMul(
 // ---------------------------------------------------------------------------
 extern "C" JNIEXPORT void JNICALL
 Java_com_Nexora_ai_ml_NativeOps_nativeGeluInplace(JNIEnv* env, jclass, jfloatArray xArr, jint n) {
+    if (xArr == nullptr || n < 0 || env->GetArrayLength(xArr) < n) return;
     float* x = env->GetFloatArrayElements(xArr, nullptr);
+    if (x == nullptr) return;
     const float c = 0.7978845608028654f; // sqrt(2/pi)
     for (int i = 0; i < n; i++) {
         float v = x[i];
@@ -191,8 +212,15 @@ Java_com_Nexora_ai_ml_NativeOps_nativeGeluInplace(JNIEnv* env, jclass, jfloatArr
 extern "C" JNIEXPORT void JNICALL
 Java_com_Nexora_ai_ml_NativeOps_nativeGeluBackwardInplace(
         JNIEnv* env, jclass, jfloatArray gradArr, jfloatArray xArr, jint n) {
+    if (gradArr == nullptr || xArr == nullptr || n < 0 ||
+        env->GetArrayLength(gradArr) < n || env->GetArrayLength(xArr) < n) return;
     float* g = env->GetFloatArrayElements(gradArr, nullptr);
+    if (g == nullptr) return;
     float* x = env->GetFloatArrayElements(xArr, nullptr);
+    if (x == nullptr) {
+        env->ReleaseFloatArrayElements(gradArr, g, JNI_ABORT);
+        return;
+    }
     const float c = 0.7978845608028654f;
     for (int i = 0; i < n; i++) {
         float v = x[i];
@@ -207,7 +235,10 @@ Java_com_Nexora_ai_ml_NativeOps_nativeGeluBackwardInplace(
 extern "C" JNIEXPORT void JNICALL
 Java_com_Nexora_ai_ml_NativeOps_nativeSoftmaxRows(
         JNIEnv* env, jclass, jfloatArray xArr, jint rows, jint cols) {
+    if (xArr == nullptr || rows <= 0 || cols <= 0 ||
+        static_cast<jlong>(rows) * cols > env->GetArrayLength(xArr)) return;
     float* x = env->GetFloatArrayElements(xArr, nullptr);
+    if (x == nullptr) return;
     for (int r = 0; r < rows; r++) {
         float* row = x + r * cols;
         float mx = row[0];
@@ -223,8 +254,16 @@ Java_com_Nexora_ai_ml_NativeOps_nativeSoftmaxRows(
 extern "C" JNIEXPORT void JNICALL
 Java_com_Nexora_ai_ml_NativeOps_nativeAddBias(
         JNIEnv* env, jclass, jfloatArray xArr, jfloatArray biasArr, jint rows, jint cols) {
+    if (xArr == nullptr || biasArr == nullptr || rows < 0 || cols <= 0 ||
+        static_cast<jlong>(rows) * cols > env->GetArrayLength(xArr) ||
+        env->GetArrayLength(biasArr) < cols) return;
     float* x = env->GetFloatArrayElements(xArr, nullptr);
+    if (x == nullptr) return;
     float* b = env->GetFloatArrayElements(biasArr, nullptr);
+    if (b == nullptr) {
+        env->ReleaseFloatArrayElements(xArr, x, JNI_ABORT);
+        return;
+    }
     for (int r = 0; r < rows; r++) {
         float* row = x + r * cols;
         for (int j = 0; j < cols; j++) row[j] += b[j];
@@ -237,8 +276,15 @@ Java_com_Nexora_ai_ml_NativeOps_nativeAddBias(
 extern "C" JNIEXPORT void JNICALL
 Java_com_Nexora_ai_ml_NativeOps_nativeAxpy(
         JNIEnv* env, jclass, jfloatArray yArr, jfloatArray xArr, jfloat alpha, jint n) {
+    if (yArr == nullptr || xArr == nullptr || n < 0 ||
+        env->GetArrayLength(yArr) < n || env->GetArrayLength(xArr) < n) return;
     float* y = env->GetFloatArrayElements(yArr, nullptr);
+    if (y == nullptr) return;
     float* x = env->GetFloatArrayElements(xArr, nullptr);
+    if (x == nullptr) {
+        env->ReleaseFloatArrayElements(yArr, y, JNI_ABORT);
+        return;
+    }
 #if USE_NEON
     float32x4_t va = vdupq_n_f32(alpha);
     int i = 0;

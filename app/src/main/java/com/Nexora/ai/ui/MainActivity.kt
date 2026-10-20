@@ -1,9 +1,14 @@
 package com.Nexora.ai.ui
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.LinearEasing
@@ -24,9 +29,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.TrackChanges
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.NavigationBar
@@ -34,6 +40,8 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -51,6 +59,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -72,6 +81,8 @@ import com.Nexora.ai.ui.theme.NexoraOnSurface
 import com.Nexora.ai.ui.theme.NexoraTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -81,11 +92,28 @@ class MainActivity : ComponentActivity() {
         setContent {
             NexoraTheme {
                 var ready by remember { mutableStateOf(false) }
+                val notificationPermissionLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestPermission()
+                ) { /* The Train tab also exposes a manual permission/settings action if declined. */ }
                 LaunchedEffect(Unit) {
-                    // Real initialization: touch native lib + thread pool + checkpoint scan.
+                    // The Application has loaded the checkpoint; this confirms native CPU thread-pool readiness.
                     NativeOps.nativeSetThreads(NativeOps.nativeCpuCores())
                     delay(1200) // let the loading screen breathe
                     ready = true
+                }
+                LaunchedEffect(ready) {
+                    // Android 13+ requires an explicit runtime request; a manifest entry alone is insufficient.
+                    val permissionPrefs = getSharedPreferences("nexora_permissions", MODE_PRIVATE)
+                    if (ready && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                        ContextCompat.checkSelfPermission(
+                            this@MainActivity, Manifest.permission.POST_NOTIFICATIONS
+                        ) != PackageManager.PERMISSION_GRANTED &&
+                        !permissionPrefs.getBoolean("notification_prompt_attempted", false)
+                    ) {
+                        permissionPrefs.edit().putBoolean("notification_prompt_attempted", true).apply()
+                        delay(350)
+                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    }
                 }
                 Box(Modifier.fillMaxSize().background(NexoraBg)) {
                     if (ready) MainScaffold() else LoadingScreen()
@@ -118,13 +146,14 @@ fun LoadingScreen() {
 
 private data class NavItem(val route: String, val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector)
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScaffold() {
     val nav = rememberNavController()
     val context = androidx.compose.ui.platform.LocalContext.current
     val items = listOf(
         NavItem("home", "Home", Icons.Filled.Home),
-        NavItem("dataset", "Data", Icons.Filled.InsertDriveFile),
+        NavItem("dataset", "Data", Icons.AutoMirrored.Filled.InsertDriveFile),
         NavItem("train", "Train", Icons.Filled.TrackChanges),
         NavItem("chat", "Chat", Icons.AutoMirrored.Filled.Chat),
         NavItem("lab", "Lab", Icons.Filled.Science)
@@ -134,18 +163,46 @@ fun MainScaffold() {
 
     // Start foreground service whenever training is running.
     LaunchedEffect(Unit) {
-        TrainingController.state.collectLatest { s ->
-            if (s.phase == com.Nexora.ai.train.Phase.RUNNING || s.phase == com.Nexora.ai.train.Phase.PAUSED) {
-                context.startForegroundService(Intent(context, TrainingService::class.java))
+        TrainingController.state
+            .map { it.phase }
+            .distinctUntilChanged()
+            .collectLatest { phase ->
+                if (phase == com.Nexora.ai.train.Phase.RUNNING || phase == com.Nexora.ai.train.Phase.PAUSED) {
+                    context.startForegroundService(Intent(context, TrainingService::class.java))
+                }
             }
-        }
     }
 
     Scaffold(
         containerColor = NexoraBg,
+        topBar = {
+            TopAppBar(
+                title = {
+                    androidx.compose.foundation.layout.Row(
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Nexora",
+                            color = com.Nexora.ai.ui.theme.ElectricCyan,
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 19.sp
+                        )
+                        Text(
+                            " • Studio On-Device",
+                            color = NexoraMuted,
+                            fontSize = 12.sp
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = com.Nexora.ai.ui.theme.CyberSurface,
+                    titleContentColor = NexoraOnSurface
+                )
+            )
+        },
         bottomBar = {
             NavigationBar(
-                containerColor = Color(0xFF0A1018),
+                containerColor = com.Nexora.ai.ui.theme.CyberSurfaceCard,
                 contentColor = NexoraOnSurface,
                 tonalElevation = 0.dp
             ) {
@@ -168,7 +225,7 @@ fun MainScaffold() {
                                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
                             )
                         },
-                        alwaysShowLabel = false,
+                        alwaysShowLabel = true,
                         colors = NavigationBarItemDefaults.colors(
                             selectedIconColor = NexoraPrimary,
                             selectedTextColor = NexoraPrimary,

@@ -21,18 +21,33 @@ class Tokenizer private constructor(
 
     fun encode(text: String, addBos: Boolean = true, addEos: Boolean = false): IntArray {
         val out = mutableListOf<Int>()
-        if (addBos) out += bosId
-        val pieces = splitToPieces(text)
-        for (p in pieces) {
-            val id = wordToId[p]
+        encodeTo(text, addBos, addEos) { out.add(it); true }
+        return out.toIntArray()
+    }
+
+    /**
+     * Encode directly into a consumer. Returning false stops immediately; this avoids a
+     * boxed MutableList<Int> per row when streaming large training datasets.
+     */
+    fun encodeTo(
+        text: String,
+        addBos: Boolean = true,
+        addEos: Boolean = false,
+        emit: (Int) -> Boolean
+    ): Boolean {
+        if (addBos && !emit(bosId)) return false
+        for (match in PIECE_REGEX.findAll(text)) {
+            val piece = match.value
+            val id = wordToId[piece]
             if (id != null) {
-                out += id
+                if (!emit(id)) return false
             } else {
-                for (b in p.toByteArray(Charsets.UTF_8)) out += byteOffset + (b.toInt() and 0xFF)
+                for (byte in piece.toByteArray(Charsets.UTF_8)) {
+                    if (!emit(byteOffset + (byte.toInt() and 0xFF))) return false
+                }
             }
         }
-        if (addEos) out += eosId
-        return out.toIntArray()
+        return !addEos || emit(eosId)
     }
 
     fun decode(ids: IntArray): String {
@@ -69,9 +84,16 @@ class Tokenizer private constructor(
         const val SPECIAL = 4
         const val BYTES = 256
 
-        private val PIECE_REGEX = Regex("""[A-Za-z0-9]+|\s+|[^\sA-Za-z0-9]+""")
+        // Cap piece length to keep vocabulary items compact and compatible with writeUTF.
+        // Unknown pieces still round-trip through the tokenizer's UTF-8 byte fallback.
+        private val PIECE_REGEX = Regex("""[A-Za-z0-9]{1,64}|\s{1,64}|[^\sA-Za-z0-9]{1,64}""")
 
         fun splitToPieces(text: String): List<String> = PIECE_REGEX.findAll(text).map { it.value }.toList()
+
+        /** Visit pieces without allocating a temporary list for each dataset row. */
+        fun forEachPiece(text: String, emit: (String) -> Unit) {
+            for (match in PIECE_REGEX.findAll(text)) emit(match.value)
+        }
 
         /** Build vocab from frequency map; keeps top (vocabSize - SPECIAL - BYTES) words. */
         fun build(freq: Map<String, Int>, vocabSize: Int): Tokenizer {
@@ -88,14 +110,21 @@ class Tokenizer private constructor(
         fun load(input: DataInputStream): Tokenizer {
             val vocabSize = input.readInt()
             val n = input.readInt()
+            require(vocabSize in (SPECIAL + BYTES)..65_536) { "Invalid tokenizer vocabulary size" }
+            require(n == vocabSize) { "Tokenizer table size does not match vocabulary" }
             val idToWord = arrayOfNulls<String>(n)
             val wordToId = HashMap<String, Int>()
             for (i in 0 until n) {
                 if (input.readBoolean()) {
-                    val w = input.readUTF()
-                    idToWord[i] = w
-                    if (i >= SPECIAL + BYTES) wordToId[w] = i
+                    val word = input.readUTF()
+                    require(word.length <= 65_535) { "Tokenizer piece exceeds supported length" }
+                    idToWord[i] = word
+                    if (i >= SPECIAL + BYTES) wordToId[word] = i
                 }
+            }
+            require(idToWord[0] == "<pad>" && idToWord[1] == "<bos>" &&
+                idToWord[2] == "<eos>" && idToWord[3] == "<unk>") {
+                "Tokenizer special-token table is invalid"
             }
             return Tokenizer(vocabSize, wordToId, idToWord)
         }
