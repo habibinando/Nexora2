@@ -13,8 +13,8 @@ object AppSettings {
     private var preferences: SharedPreferences? = null
 
     private val _modelCfg = MutableStateFlow(
-        ModelConfig(vocabSize = 16000, seqLen = 128, dModel = 128, ffnDim = 512,
-            numHeads = 8, numLayers = 32, dropout = 0.1f, useLora = false, loraRank = 8, loraAlpha = 16)
+        ModelConfig(vocabSize = 16000, seqLen = 64, dModel = 128, ffnDim = 512,
+            numHeads = 8, numLayers = 8, dropout = 0.1f, useLora = false, loraRank = 8, loraAlpha = 16)
     )
     val modelCfg: StateFlow<ModelConfig> = _modelCfg.asStateFlow()
 
