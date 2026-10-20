@@ -84,7 +84,9 @@ class Tokenizer private constructor(
         const val SPECIAL = 4
         const val BYTES = 256
 
-        private val PIECE_REGEX = Regex("""[A-Za-z0-9]+|\s+|[^\sA-Za-z0-9]+""")
+        // Cap piece length to keep vocabulary items compact and compatible with writeUTF.
+        // Unknown pieces still round-trip through the tokenizer's UTF-8 byte fallback.
+        private val PIECE_REGEX = Regex("""[A-Za-z0-9]{1,64}|\s{1,64}|[^\sA-Za-z0-9]{1,64}""")
 
         fun splitToPieces(text: String): List<String> = PIECE_REGEX.findAll(text).map { it.value }.toList()
 
@@ -108,14 +110,21 @@ class Tokenizer private constructor(
         fun load(input: DataInputStream): Tokenizer {
             val vocabSize = input.readInt()
             val n = input.readInt()
+            require(vocabSize in (SPECIAL + BYTES)..65_536) { "Invalid tokenizer vocabulary size" }
+            require(n == vocabSize) { "Tokenizer table size does not match vocabulary" }
             val idToWord = arrayOfNulls<String>(n)
             val wordToId = HashMap<String, Int>()
             for (i in 0 until n) {
                 if (input.readBoolean()) {
-                    val w = input.readUTF()
-                    idToWord[i] = w
-                    if (i >= SPECIAL + BYTES) wordToId[w] = i
+                    val word = input.readUTF()
+                    require(word.length <= 64) { "Tokenizer piece exceeds supported length" }
+                    idToWord[i] = word
+                    if (i >= SPECIAL + BYTES) wordToId[word] = i
                 }
+            }
+            require(idToWord[0] == "<pad>" && idToWord[1] == "<bos>" &&
+                idToWord[2] == "<eos>" && idToWord[3] == "<unk>") {
+                "Tokenizer special-token table is invalid"
             }
             return Tokenizer(vocabSize, wordToId, idToWord)
         }
