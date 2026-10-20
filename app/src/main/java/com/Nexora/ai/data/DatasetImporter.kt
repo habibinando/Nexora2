@@ -243,7 +243,7 @@ object DatasetImporter {
         input.use { stream ->
             BufferedReader(InputStreamReader(stream, Charsets.UTF_8), 1 shl 20).use { reader ->
                 while (true) {
-                    val line = reader.readLine() ?: break
+                    val line = if (format == "csv" || format == "tsv") readCsvRecord(reader) else reader.readLine() ?: break
                     lineNumber++
                     bytesRead += line.toByteArray(Charsets.UTF_8).size.toLong() + 1L
                     if (bytesRead > MAX_BYTES) {
@@ -352,7 +352,68 @@ object DatasetImporter {
     }
 
 
-    /** CSV/TSV line parser with quoted fields and escaped double quotes. */
+    /**
+     * Read one logical CSV/TSV record, preserving newlines inside quoted fields.
+     * The previous physical-line reader could silently split a valid multiline field
+     * into unrelated examples. An unclosed quoted field is rejected instead.
+     */
+    private fun readCsvRecord(reader: BufferedReader): String? {
+        val record = StringBuilder()
+        var inQuotes = false
+        var sawAny = false
+
+        while (true) {
+            val nextChar = reader.read()
+            if (nextChar == -1) {
+                if (!sawAny) return null
+                if (inQuotes) {
+                    throw IllegalArgumentException("CSV/TSV berisi field bertanda kutip yang tidak ditutup.")
+                }
+                return record.toString()
+            }
+
+            sawAny = true
+            when (val ch = nextChar.toChar()) {
+                '"' -> {
+                    record.append(ch)
+                    if (inQuotes) {
+                        // Inside a quoted field, a doubled quote is an escaped literal quote.
+                        reader.mark(1)
+                        val lookahead = reader.read()
+                        if (lookahead == '"'.code) {
+                            record.append('"')
+                        } else {
+                            inQuotes = false
+                            if (lookahead != -1) reader.reset()
+                        }
+                    } else {
+                        inQuotes = true
+                    }
+                }
+                '\n' -> {
+                    if (inQuotes) record.append(ch) else return record.toString()
+                }
+                '\r' -> {
+                    reader.mark(1)
+                    val lookahead = reader.read()
+                    if (inQuotes) {
+                        record.append(ch)
+                        if (lookahead == '\n'.code) {
+                            record.append('\n')
+                        } else if (lookahead != -1) {
+                            reader.reset()
+                        }
+                    } else {
+                        if (lookahead != -1 && lookahead != '\n'.code) reader.reset()
+                        return record.toString()
+                    }
+                }
+                else -> record.append(ch)
+            }
+        }
+    }
+
+    /** CSV/TSV record parser with quoted fields, embedded newlines, and escaped double quotes. */
     fun parseCsvLine(line: String, delimiter: Char = ','): List<String> {
         val out = mutableListOf<String>()
         val current = StringBuilder()
