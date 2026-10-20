@@ -21,7 +21,7 @@ object DeviceModelAdvisor {
     private const val GIB: Long = 1024L * 1024L * 1024L
     private const val MIB: Long = 1024L * 1024L
 
-    fun recommend(device: DeviceDiagnostics.Report): Recommendation {
+    fun recommend(device: DeviceDiagnostics.Report, gpuInfo: String = ""): Recommendation {
         val availableGiB = device.availableRamBytes.toDouble() / GIB.toDouble()
         val physicalGiB = device.totalRamBytes.toDouble() / GIB.toDouble()
         val hot = listOf("hangat", "panas", "severe", "critical", "darurat", "shutdown")
@@ -116,6 +116,11 @@ object DeviceModelAdvisor {
             add("RAM fisik ${"%.1f".format(Locale.US, physicalGiB)} GiB; RAM tersedia saat deteksi ${"%.1f".format(Locale.US, availableGiB)} GiB. RAM virtual/ekspansi OEM tidak dihitung sebagai RAM fisik.")
             add("Batas heap besar aplikasi ${device.largeMemoryClassMb} MiB; rekomendasi menyisakan ruang untuk Android, aktivasi, gradien, dan optimizer.")
             add("Training awal dari nol direkomendasikan dengan LoRA mati agar bobot linear ikut belajar.")
+            when {
+                gpuInfo.contains("tes akurasi GEMM: LULUS", ignoreCase = true) -> add("Validasi GEMM Vulkan lolos; akselerasi hanya dipakai untuk perkalian matriks besar tertentu. Attention dan AdamW tetap membebani CPU.")
+                gpuInfo.isBlank() || gpuInfo.contains("belum diperiksa", ignoreCase = true) -> add("GPU belum tervalidasi saat rekomendasi dibuat; ukuran model dipilih berdasarkan RAM/heap agar tetap aman.")
+                else -> add("GEMM Vulkan belum lolos/tidak tersedia; model akan mengandalkan CPU untuk operasi terkait. Jangan membesarkan model hanya karena nama GPU.")
+            }
             if (device.cpuCoresRuntime <= 4) add("CPU melaporkan ${device.cpuCoresRuntime} core; jumlah thread dibatasi untuk mengurangi kompetisi CPU.")
             if (device.lowMemory || availableGiB < 1.0) add("RAM bebas sedang rendah. Tutup aplikasi lain sebelum impor dataset dan mulai dengan dataset kecil.")
             if (hot) add("Sensor termal melaporkan perangkat hangat/panas; batch dan thread diturunkan. Dinginkan perangkat jika temperatur terus naik.")
