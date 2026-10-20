@@ -197,7 +197,7 @@ fun TrainScreen() {
                         fontWeight = FontWeight.Bold
                     )
                 }
-                Text(progressPercent.toString() + "%", color = phaseColor(state.phase), fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
+                Text(if (progress > 0f && progress < 0.01f) "%.2f%%".format(Locale.US, progress * 100f) else "$progressPercent%", color = phaseColor(state.phase), fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
             }
             LinearProgressIndicator(
                 progress = { progress },
