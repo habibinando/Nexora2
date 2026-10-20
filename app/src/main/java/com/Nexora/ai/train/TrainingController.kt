@@ -331,7 +331,7 @@ object TrainingController {
             } catch (e: Exception) {
                 _state.value = _state.value.copy(
                     phase = Phase.ERROR,
-                    message = "Training gagal: \${e.message ?: e::class.java.simpleName}"
+                    message = "Training gagal: ${e.message ?: e::class.java.simpleName}"
                 )
             }
         }
@@ -479,7 +479,7 @@ object TrainingController {
                     batchInEpoch = batchIndex + 1,
                     batchesInEpoch = stepsPerEpoch,
                     step = step,
-                    message = "Epoch \${epochIndex + 1}/\${hp.epochs} · batch \${batchIndex + 1}/$stepsPerEpoch — forward pass…"
+                    message = "Epoch ${epochIndex + 1}/${hp.epochs} · batch ${batchIndex + 1}/$stepsPerEpoch — forward pass…"
                 )
 
                 synchronized(m) {
@@ -490,14 +490,14 @@ object TrainingController {
                     if (!loss.isFinite()) {
                         _state.value = _state.value.copy(
                             phase = Phase.ERROR,
-                            message = "Loss tidak valid pada epoch \${epochIndex + 1}, batch \${batchIndex + 1}; optimizer dihentikan."
+                            message = "Loss tidak valid pada epoch ${epochIndex + 1}, batch ${batchIndex + 1}; optimizer dihentikan."
                         )
                         saveLastValidCheckpoint(completedEpochs)
                         return
                     }
 
                     _state.value = _state.value.copy(
-                        message = "Epoch \${epochIndex + 1}/\${hp.epochs} · batch \${batchIndex + 1}/$stepsPerEpoch — backpropagation…"
+                        message = "Epoch ${epochIndex + 1}/${hp.epochs} · batch ${batchIndex + 1}/$stepsPerEpoch — backpropagation…"
                     )
                     m.backward(gradLogits)
 
@@ -506,7 +506,7 @@ object TrainingController {
                     if (!gNorm.isFinite() || gNorm < 0f) {
                         _state.value = _state.value.copy(
                             phase = Phase.ERROR,
-                            message = "Gradien tidak valid pada epoch \${epochIndex + 1}; optimizer tidak dijalankan."
+                            message = "Gradien tidak valid pada epoch ${epochIndex + 1}; optimizer tidak dijalankan."
                         )
                         saveLastValidCheckpoint(completedEpochs)
                         return
@@ -517,7 +517,7 @@ object TrainingController {
                     }
 
                     _state.value = _state.value.copy(
-                        message = "Epoch \${epochIndex + 1}/\${hp.epochs} · batch \${batchIndex + 1}/$stepsPerEpoch — AdamW memperbarui bobot…"
+                        message = "Epoch ${epochIndex + 1}/${hp.epochs} · batch ${batchIndex + 1}/$stepsPerEpoch — AdamW memperbarui bobot…"
                     )
                     // Scheduler progress is local to this requested training run; the
                     // optimizer keeps its own global step for AdamW bias correction.
@@ -544,7 +544,7 @@ object TrainingController {
                     var shouldStopEarly = false
                     if (step % hp.evalEvery == 0 || isLastBatch) {
                         _state.value = _state.value.copy(
-                            message = "Epoch \${epochIndex + 1}/\${hp.epochs} · evaluasi validation loss pada step $step…"
+                            message = "Epoch ${epochIndex + 1}/${hp.epochs} · evaluasi validation loss pada step $step…"
                         )
                         valLoss = evaluate(m, vocab, trainEnd, B, S)
                         if (!valLoss.isFinite()) {
@@ -563,9 +563,9 @@ object TrainingController {
 
                     val activePhase = if (paused) Phase.PAUSED else Phase.RUNNING
                     val activeMessage = if (paused) {
-                        "Epoch \${epochIndex + 1}/\${hp.epochs}: batch \${batchIndex + 1}/$stepsPerEpoch selesai; training dijeda."
+                        "Epoch ${epochIndex + 1}/${hp.epochs}: batch ${batchIndex + 1}/$stepsPerEpoch selesai; training dijeda."
                     } else {
-                        "Training aktif — epoch \${epochIndex + 1}/\${hp.epochs}, batch \${batchIndex + 1}/$stepsPerEpoch."
+                        "Training aktif — epoch ${epochIndex + 1}/${hp.epochs}, batch ${batchIndex + 1}/$stepsPerEpoch."
                     }
                     _state.value = buildState(
                         step = step,
@@ -606,7 +606,7 @@ object TrainingController {
                 batchInEpoch = stepsPerEpoch,
                 batchesInEpoch = stepsPerEpoch,
                 step = step,
-                message = "Epoch $completedEpochs/\${hp.epochs} selesai. Menyimpan checkpoint bobot dan optimizer…"
+                message = "Epoch $completedEpochs/${hp.epochs} selesai. Menyimpan checkpoint bobot dan optimizer…"
             )
             // Always publish a complete-epoch checkpoint so a restart never mistakes
             // the optimizer step count for the completed epoch count.
@@ -625,7 +625,7 @@ object TrainingController {
             message = if (stopped) {
                 "Training dihentikan pengguna. Checkpoint tersimpan pada epoch $completedEpochs."
             } else {
-                "Training selesai: $completedEpochs/\${hp.epochs} epoch. Checkpoint final tersimpan."
+                "Training selesai: $completedEpochs/${hp.epochs} epoch. Checkpoint final tersimpan."
             }
         )
     }
