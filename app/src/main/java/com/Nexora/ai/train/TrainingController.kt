@@ -81,7 +81,10 @@ data class TrainState(
     /** Fraction of the active batch estimated from actual operation/layer callbacks. */
     val batchProgress: Float = 0f,
     /** Monotonic duration of the current operation; refreshed while work is in progress. */
-    val operationElapsedMs: Long = 0L
+    val operationElapsedMs: Long = 0L,
+    val activeStep: Int = 0,
+    val targetSteps: Int = 0,
+    val stepProgress: Float = 0f
 )
 
 /**
@@ -197,9 +200,14 @@ object TrainingController {
             else -> liveBatchProgress.coerceAtLeast(0.01f)
         }
         liveBatchProgress = maxOf(liveBatchProgress, stageFraction).coerceIn(0f, 0.999f)
+        val stepProgress = if (
+            label.contains("validasi", ignoreCase = true) ||
+            label.contains("checkpoint", ignoreCase = true)
+        ) 1f else liveBatchProgress
         _state.value = _state.value.copy(
             operation = label,
             batchProgress = liveBatchProgress,
+            stepProgress = stepProgress,
             operationElapsedMs = (SystemClock.elapsedRealtime() - liveOperationStartedAtMs).coerceAtLeast(0L)
         )
     }
