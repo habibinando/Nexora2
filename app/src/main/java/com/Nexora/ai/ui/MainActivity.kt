@@ -72,6 +72,8 @@ import com.Nexora.ai.ui.theme.NexoraOnSurface
 import com.Nexora.ai.ui.theme.NexoraTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -134,11 +136,14 @@ fun MainScaffold() {
 
     // Start foreground service whenever training is running.
     LaunchedEffect(Unit) {
-        TrainingController.state.collectLatest { s ->
-            if (s.phase == com.Nexora.ai.train.Phase.RUNNING || s.phase == com.Nexora.ai.train.Phase.PAUSED) {
-                context.startForegroundService(Intent(context, TrainingService::class.java))
+        TrainingController.state
+            .map { it.phase }
+            .distinctUntilChanged()
+            .collectLatest { phase ->
+                if (phase == com.Nexora.ai.train.Phase.RUNNING || phase == com.Nexora.ai.train.Phase.PAUSED) {
+                    context.startForegroundService(Intent(context, TrainingService::class.java))
+                }
             }
-        }
     }
 
     Scaffold(
