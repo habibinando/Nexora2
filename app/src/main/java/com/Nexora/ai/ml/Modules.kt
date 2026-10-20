@@ -7,11 +7,11 @@ import kotlin.random.Random
 
 data class ModelConfig(
     val vocabSize: Int = 16000,
-    val seqLen: Int = 128,
+    val seqLen: Int = 64,
     val dModel: Int = 128,
     val ffnDim: Int = 512,
     val numHeads: Int = 8,
-    val numLayers: Int = 32,
+    val numLayers: Int = 8,
     val dropout: Float = 0.1f,
     val useLora: Boolean = false,
     val loraRank: Int = 8,
