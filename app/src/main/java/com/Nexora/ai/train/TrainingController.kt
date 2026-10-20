@@ -569,6 +569,11 @@ object TrainingController {
             .coerceAtMost(Int.MAX_VALUE.toLong()).toInt().coerceAtLeast(1)
         // Scheduler step is local to this training run, independent of AdamW's
         // lifetime step count. Small datasets cap warmup to 10% of planned updates.
+        _state.value = _state.value.copy(
+            targetSteps = (step.toLong() + plannedRunSteps.toLong()).coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+            activeStep = step,
+            totalEpochs = hp.epochs
+        )
         val effectiveWarmup = minOf(hp.warmupSteps, plannedRunSteps / 10)
         val scheduler = CosineWarmupScheduler(
             maxLR = hp.learningRate,
@@ -615,6 +620,9 @@ object TrainingController {
                     batchInEpoch = batchIndex + 1,
                     batchesInEpoch = stepsPerEpoch,
                     batchProgress = 0f,
+                    stepProgress = 0f,
+                    activeStep = step + 1,
+                    targetSteps = (step.toLong() + plannedRunSteps.toLong()).coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
                     step = step
                 )
                 reportOperation("Menyiapkan batch ${batchIndex + 1}/$stepsPerEpoch · mengambil token input/target")
@@ -693,6 +701,7 @@ object TrainingController {
                     optimizer.step(lr, onProgress = ::reportOperation)
                     scheduleStep++
                     step = optimizer.step
+                    _state.value = _state.value.copy(step = step, activeStep = step, stepProgress = 1f)
                     tokensSeen += T.toLong()
 
                     val stepMs = (System.currentTimeMillis() - stepStart).coerceAtLeast(1)
@@ -843,6 +852,8 @@ object TrainingController {
         batchInEpoch = batchIndex,
         batchesInEpoch = batchesPerEpoch,
         batchProgress = 1f,
+        stepProgress = 1f,
+        activeStep = step,
         loss = loss,
         valLoss = valLoss,
         bestValLoss = best,
