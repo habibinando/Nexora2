@@ -5,7 +5,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.infiniteRepeatable
@@ -17,11 +17,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Science
@@ -30,6 +31,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -65,9 +67,11 @@ import com.Nexora.ai.ui.screens.TrainScreen
 import com.Nexora.ai.ui.theme.AccentGradient
 import com.Nexora.ai.ui.theme.NexoraBg
 import com.Nexora.ai.ui.theme.NexoraMuted
+import com.Nexora.ai.ui.theme.NexoraPrimary
 import com.Nexora.ai.ui.theme.NexoraOnSurface
 import com.Nexora.ai.ui.theme.NexoraTheme
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -95,9 +99,6 @@ class MainActivity : ComponentActivity() {
 fun LoadingScreen() {
     val transition = rememberInfiniteTransition(label = "load")
     val rot = transition.animateFloat(0f, 360f, infiniteRepeatable(tween(1400, easing = LinearEasing), RepeatMode.Restart), label = "rot")
-    val statuses = listOf("Memuat inti neural…", "Mendeteksi core CPU…", "GPU compute probe…", "Memeriksa checkpoint…")
-    var idx by remember { mutableStateOf(0) }
-    LaunchedEffect(Unit) { while (true) { delay(700); idx = (idx + 1) % statuses.size } }
     Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
         Box(Modifier.size(120.dp), contentAlignment = Alignment.Center) {
             Canvas(Modifier.size(120.dp).rotate(rot.value)) {
@@ -106,12 +107,12 @@ fun LoadingScreen() {
                     style = Stroke(width = 10f, cap = StrokeCap.Round)
                 )
             }
-            Text("N", fontSize = 44.sp, fontWeight = FontWeight.Black, brush = AccentGradient)
+            Text("N", fontSize = 44.sp, fontWeight = FontWeight.Black, color = com.Nexora.ai.ui.theme.NexoraPrimary)
         }
         Text("NEXORA", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = NexoraOnSurface, letterSpacing = 8.sp, modifier = Modifier.padding(top = 24.dp))
         Text("On-device AI language training", color = NexoraMuted, fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp))
         LinearProgressIndicator(Modifier.padding(top = 32.dp, start = 48.dp, end = 48.dp).fillMaxWidth(), color = androidx.compose.material3.MaterialTheme.colorScheme.primary)
-        Text(statuses[idx], color = NexoraMuted, fontSize = 12.sp, modifier = Modifier.padding(top = 16.dp))
+        Text("Memuat antarmuka Nexora…", color = NexoraMuted, fontSize = 12.sp, modifier = Modifier.padding(top = 16.dp))
     }
 }
 
@@ -125,7 +126,7 @@ fun MainScaffold() {
         NavItem("home", "Home", Icons.Filled.Home),
         NavItem("dataset", "Data", Icons.Filled.InsertDriveFile),
         NavItem("train", "Train", Icons.Filled.TrackChanges),
-        NavItem("chat", "Chat", Icons.Filled.Chat),
+        NavItem("chat", "Chat", Icons.AutoMirrored.Filled.Chat),
         NavItem("lab", "Lab", Icons.Filled.Science)
     )
     val back by nav.currentBackStackEntryAsState()
@@ -133,9 +134,9 @@ fun MainScaffold() {
 
     // Start foreground service whenever training is running.
     LaunchedEffect(Unit) {
-        kotlinx.coroutines.flow.collectLatest(TrainingController.state) { s ->
-            if (s.phase == com.Nexora.ai.train.Phase.RUNNING) {
-                context.startService(Intent(context, TrainingService::class.java))
+        TrainingController.state.collectLatest { s ->
+            if (s.phase == com.Nexora.ai.train.Phase.RUNNING || s.phase == com.Nexora.ai.train.Phase.PAUSED) {
+                context.startForegroundService(Intent(context, TrainingService::class.java))
             }
         }
     }
@@ -143,13 +144,38 @@ fun MainScaffold() {
     Scaffold(
         containerColor = NexoraBg,
         bottomBar = {
-            NavigationBar(containerColor = Color(0xFF0A1018)) {
+            NavigationBar(
+                containerColor = Color(0xFF0A1018),
+                contentColor = NexoraOnSurface,
+                tonalElevation = 0.dp
+            ) {
                 items.forEach { item ->
+                    val selected = current == item.route
                     NavigationBarItem(
-                        selected = current == item.route,
-                        onClick = { nav.navigate(item.route) { popUpTo(nav.graph.startDestinationId) { saveState = true }; launchSingleTop = true; restoreState = true } },
-                        icon = { Icon(item.icon, contentDescription = item.label) },
-                        label = { Text(item.label, fontSize = 10.sp) }
+                        selected = selected,
+                        onClick = {
+                            nav.navigate(item.route) {
+                                popUpTo(nav.graph.startDestinationId) { saveState = true }
+                                launchSingleTop = true
+                                restoreState = true
+                            }
+                        },
+                        icon = { Icon(item.icon, contentDescription = item.label, modifier = Modifier.size(22.dp)) },
+                        label = {
+                            Text(
+                                item.label,
+                                fontSize = 10.sp,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
+                            )
+                        },
+                        alwaysShowLabel = false,
+                        colors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = NexoraPrimary,
+                            selectedTextColor = NexoraPrimary,
+                            indicatorColor = NexoraPrimary.copy(alpha = 0.14f),
+                            unselectedIconColor = NexoraMuted,
+                            unselectedTextColor = NexoraMuted
+                        )
                     )
                 }
             }

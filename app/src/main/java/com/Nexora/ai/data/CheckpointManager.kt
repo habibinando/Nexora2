@@ -2,7 +2,7 @@ package com.Nexora.ai.data
 
 import com.Nexora.ai.ml.GPT
 import com.Nexora.ai.ml.ModelConfig
-import com.Nexora.ai.ml.Optimizer
+import com.Nexora.ai.ml.AdamW
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.File
@@ -24,7 +24,7 @@ class CheckpointManager(private val dir: File) {
         val tokensSeen: Long
     )
 
-    fun save(model: GPT, optimizer: Optimizer, tokenizer: Tokenizer, meta: Meta) {
+    fun save(model: GPT, optimizer: AdamW, tokenizer: Tokenizer, meta: Meta) {
         DataOutputStream(FileOutputStream(File(dir, "config.bin"))).use { o ->
             val c = model.cfg
             o.writeInt(c.vocabSize); o.writeInt(c.seqLen); o.writeInt(c.dModel); o.writeInt(c.ffnDim)
@@ -81,7 +81,7 @@ class CheckpointManager(private val dir: File) {
         true
     } catch (_: Exception) { false }
 
-    fun loadOptimizerState(optimizer: Optimizer): Pair<Int, List<Pair<FloatArray, FloatArray>>>? = try {
+    fun loadOptimizerState(optimizer: AdamW): Pair<Int, List<Pair<FloatArray, FloatArray>>>? = try {
         DataInputStream(FileInputStream(File(dir, "optimizer.bin"))).use { i ->
             val step = i.readInt()
             val state = optimizer.state().map { (m, v) ->

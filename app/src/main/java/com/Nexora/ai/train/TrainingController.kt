@@ -12,6 +12,8 @@ import com.Nexora.ai.ml.MathUtil
 import com.Nexora.ai.ml.ModelConfig
 import com.Nexora.ai.ml.NativeOps
 import com.Nexora.ai.ml.crossEntropy
+import com.Nexora.ai.ui.AppSettings
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -84,6 +86,7 @@ object TrainingController {
 
     @Volatile private var paused = false
     @Volatile private var stopped = false
+    @Volatile private var resumeCheckpointCompatible = false
 
     fun init(context: Context) {
         appContext = context.applicationContext
@@ -92,6 +95,7 @@ object TrainingController {
         // Resume weights if present ("bobot terus bertambah")
         val cfg = checkpointManager.loadConfig()
         if (cfg != null) {
+            AppSettings.updateModel { cfg }
             val m = GPT(cfg)
             if (checkpointManager.loadTensors(m)) {
                 model = m
@@ -117,19 +121,42 @@ object TrainingController {
             mutex.withLock {
                 _state.value = _state.value.copy(phase = Phase.IMPORTING, message = "Mengimpor dataset…", importProgress = 0f)
                 try {
-                    val result = DatasetImporter.import(appContext, uri, modelCfg.vocabSize) { p, msg ->
+                    val savedCfg = checkpointManager.loadConfig()
+                    val savedTokenizer = checkpointManager.loadTokenizer()
+                    val canReuseCheckpoint = savedCfg != null && savedTokenizer != null &&
+                        savedCfg.vocabSize == modelCfg.vocabSize &&
+                        savedTokenizer.vocabSize == savedCfg.vocabSize &&
+                        savedCfg == modelCfg.copy(vocabSize = savedCfg.vocabSize)
+                    val result = DatasetImporter.import(
+                        appContext,
+                        uri,
+                        modelCfg.vocabSize,
+                        tokenizerOverride = if (canReuseCheckpoint) savedTokenizer else null
+                    ) { p, msg ->
                         _state.value = _state.value.copy(importProgress = p, message = msg)
                     }
                     tokenizer = result.tokenizer
                     corpus = result.tokens
-                    val m = GPT(modelCfg.copy(vocabSize = result.tokenizer.vocabSize))
-                    // If a checkpoint exists with same vocab, resume weights
-                    val savedCfg = checkpointManager.loadConfig()
-                    if (savedCfg?.vocabSize == result.tokenizer.vocabSize) checkpointManager.loadTensors(m)
+                    val actualCfg = modelCfg.copy(vocabSize = result.tokenizer.vocabSize)
+                    var m = GPT(actualCfg)
+                    val checkpointCompatible = canReuseCheckpoint &&
+                        savedCfg == actualCfg && checkpointManager.loadTensors(m)
+                    if (canReuseCheckpoint && !checkpointCompatible) m = GPT(actualCfg)
+                    resumeCheckpointCompatible = checkpointCompatible
                     model = m
+                    val meta = if (checkpointCompatible) checkpointManager.loadMeta() else null
                     _state.value = _state.value.copy(
                         phase = Phase.READY,
-                        message = "Dataset siap: ${result.numExamples} contoh, ${result.tokens.size} token" + if (result.truncated) " (dipotong)" else "",
+                        step = meta?.step ?: 0,
+                        epoch = meta?.epoch ?: 0,
+                        loss = 0f,
+                        valLoss = 0f,
+                        bestValLoss = meta?.bestValLoss ?: Float.MAX_VALUE,
+                        elapsedMs = 0L,
+                        etaMs = 0L,
+                        lossHistory = meta?.lossHistory ?: emptyList(),
+                        message = "Dataset siap: ${result.numExamples} contoh, ${result.tokens.size} token" +
+                            if (result.truncated) " (dipotong)" else "",
                         numTokens = result.tokens.size,
                         numExamples = result.numExamples,
                         vocabSize = result.tokenizer.vocabSize,
@@ -146,16 +173,52 @@ object TrainingController {
 
     fun startTraining(hp: HyperParams) {
         val m = model ?: run { _state.value = _state.value.copy(phase = Phase.ERROR, message = "Belum ada model/dataset. Impor dataset dulu."); return }
-        if (corpus.size < m.cfg.seqLen * 2) { _state.value = _state.value.copy(phase = Phase.ERROR, message = "Corpus terlalu kecil."); return }
+        val span = m.cfg.seqLen + 1
+        val requiredTokens = span.toLong() * (hp.batchSize + 1L)
+        if (corpus.size.toLong() < requiredTokens) {
+            _state.value = _state.value.copy(
+                phase = Phase.ERROR,
+                message = "Dataset terlalu kecil untuk sequence ${m.cfg.seqLen} dan batch ${hp.batchSize}; diperlukan minimal $requiredTokens token."
+            )
+            return
+        }
         if (hp.numThreads > 0) NativeOps.nativeSetThreads(hp.numThreads) else NativeOps.nativeSetThreads(NativeOps.nativeCpuCores())
-        stopped = false; paused = false
+        stopped = false
+        paused = false
         job?.cancel()
-        job = scope.launch { trainLoop(m, hp) }
+        _state.value = _state.value.copy(phase = Phase.RUNNING, message = "Menyiapkan training lokal…")
+        job = scope.launch {
+            try {
+                trainLoop(m, hp)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: OutOfMemoryError) {
+                _state.value = _state.value.copy(
+                    phase = Phase.ERROR,
+                    message = "Memori tidak cukup. Kurangi batch size, context, dimensi model, atau jumlah layer."
+                )
+            } catch (e: Exception) {
+                _state.value = _state.value.copy(
+                    phase = Phase.ERROR,
+                    message = "Training gagal: ${e.message ?: e::class.java.simpleName}"
+                )
+            }
+        }
     }
 
-    fun pause() { paused = true; _state.value = _state.value.copy(phase = Phase.PAUSED, message = "Dijeda.") }
-    fun resume() { paused = false; _state.value = _state.value.copy(phase = Phase.RUNNING, message = "Dilanjutkan.") }
-    fun stop() { stopped = true; paused = false }
+    fun pause() {
+        paused = true
+        _state.value = _state.value.copy(phase = Phase.PAUSED, message = "Jeda diminta; step aktif diselesaikan terlebih dahulu…")
+    }
+    fun resume() {
+        paused = false
+        _state.value = _state.value.copy(phase = Phase.RUNNING, message = "Training dilanjutkan.")
+    }
+    fun stop() {
+        stopped = true
+        paused = false
+        _state.value = _state.value.copy(message = "Stop diminta; menyelesaikan step aktif lalu menyimpan checkpoint…")
+    }
 
     private suspend fun trainLoop(m: GPT, hp: HyperParams) {
         _state.value = _state.value.copy(phase = Phase.RUNNING, message = "Training dimulai…")
@@ -167,24 +230,31 @@ object TrainingController {
         val rng = Random(2026)
 
         // Train / validation split (95/5)
-        val valSize = (corpus.size * 0.05).toInt().coerceAtLeast(S * 2)
+        val span = S + 1
+        val valSize = maxOf((corpus.size * 0.05).toInt(), B * span)
         val trainEnd = corpus.size - valSize
+        if (trainEnd < span || valSize < B * span) {
+            _state.value = _state.value.copy(phase = Phase.ERROR, message = "Dataset tidak cukup untuk train/validation split.")
+            return
+        }
 
         val pairs = m.trainablePairs()
         val optimizer = AdamW(pairs, weightDecay = hp.weightDecay)
         // Resume optimizer state if available
-        checkpointManager.loadOptimizerState(optimizer)?.let { (step, state) ->
-            optimizer.loadState(state, step)
+        if (resumeCheckpointCompatible) {
+            checkpointManager.loadOptimizerState(optimizer)?.let { (step, state) ->
+                optimizer.loadState(state, step)
+            }
         }
         val startStep = optimizer.step
         val scheduler = CosineWarmupScheduler(hp.learningRate, warmupSteps = hp.warmupSteps, totalSteps = hp.maxSteps)
 
-        var bestVal = _state.value.bestValLoss
-        var patienceCount = 0
-        val history = _state.value.lossHistory.toMutableList()
+        var bestVal = if (resumeCheckpointCompatible) _state.value.bestValLoss else Float.MAX_VALUE
+        var patienceCount = if (resumeCheckpointCompatible) checkpointManager.loadMeta()?.patienceCount ?: 0 else 0
+        val history = if (resumeCheckpointCompatible) _state.value.lossHistory.toMutableList() else mutableListOf()
         val gradLogits = FloatArray(T * vocab)
         val startMs = System.currentTimeMillis() - _state.value.elapsedMs
-        var tokensSeen = checkpointManager.loadMeta()?.tokensSeen ?: 0L
+        var tokensSeen = if (resumeCheckpointCompatible) checkpointManager.loadMeta()?.tokensSeen ?: 0L else 0L
         var step = startStep
 
         while (step < hp.maxSteps && !stopped) {
@@ -194,17 +264,23 @@ object TrainingController {
             val stepStart = System.currentTimeMillis()
             // Sample random batch windows
             val input = IntArray(T); val target = IntArray(T)
-            val span = S + 1
             for (b in 0 until B) {
-                val start = rng.nextInt(trainEnd - span)
+                val start = rng.nextInt(trainEnd - span + 1)
                 for (s in 0 until S) {
                     input[b * S + s] = corpus[start + s]
                     target[b * S + s] = corpus[start + s + 1]
                 }
             }
+            _state.value = _state.value.copy(message = "Forward pass — step ${step + 1}/${hp.maxSteps}. Menghitung prediksi model…")
             m.zeroGrad()
             val logits = m.forward(input, B, S, training = true)
             val loss = crossEntropy(logits, target, vocab, gradLogits)
+            if (!loss.isFinite()) {
+                _state.value = _state.value.copy(phase = Phase.ERROR, message = "Loss bukan angka valid; training dihentikan.")
+                return
+            }
+
+            _state.value = _state.value.copy(message = "Backpropagation — step ${step + 1}/${hp.maxSteps}. Menghitung gradien…")
             m.backward(gradLogits)
 
             // Gradient clipping
@@ -214,6 +290,7 @@ object TrainingController {
                 val sc = hp.gradClip / gNorm
                 for (g in grads) MathUtil.scale(g, sc)
             }
+            _state.value = _state.value.copy(message = "Optimizer — menerapkan perubahan bobot step ${step + 1}…")
             val lr = scheduler.lrAt(step)
             optimizer.step(lr)
             step = optimizer.step
@@ -230,6 +307,7 @@ object TrainingController {
 
             var valLoss = _state.value.valLoss
             if (step % hp.evalEvery == 0) {
+                _state.value = _state.value.copy(message = "Evaluasi validation loss — step $step…")
                 valLoss = evaluate(m, vocab, trainEnd, valSize, B, S, gradLogits)
                 if (valLoss < bestVal - 1e-4f) { bestVal = valLoss; patienceCount = 0 }
                 else {
@@ -242,15 +320,22 @@ object TrainingController {
                 }
             }
 
-            _state.value = buildState(step, loss, valLoss, bestVal, lr, gNorm, tps, elapsed, eta, history, Phase.RUNNING, "Training… step $step/${hp.maxSteps}")
+            val activePhase = if (paused) Phase.PAUSED else Phase.RUNNING
+            val activeMessage = if (paused) "Step $step selesai; training dijeda." else "Training aktif — step $step/${hp.maxSteps}"
+            _state.value = buildState(step, loss, valLoss, bestVal, lr, gNorm, tps, elapsed, eta, history, activePhase, activeMessage)
 
             if (step % hp.saveEvery == 0) {
+                _state.value = _state.value.copy(message = "Menyimpan checkpoint — step $step…")
                 saveCheckpoint(m, optimizer, tok, step, bestVal, patienceCount, history, tokensSeen)
                 _state.value = _state.value.copy(message = "Checkpoint disimpan (step $step). Bobot terus bertambah.")
             }
         }
+        _state.value = _state.value.copy(message = "Menyimpan checkpoint akhir…")
         saveCheckpoint(m, optimizer, tok, step, bestVal, patienceCount, history, tokensSeen)
-        _state.value = _state.value.copy(phase = if (stopped) Phase.READY else Phase.FINISHED, message = if (stopped) "Dihentikan pengguna. Checkpoint disimpan." else "Selesai! Checkpoint final disimpan.")
+        _state.value = _state.value.copy(
+            phase = if (stopped) Phase.READY else Phase.FINISHED,
+            message = if (stopped) "Dihentikan pengguna. Checkpoint disimpan." else "Selesai! Checkpoint final disimpan."
+        )
     }
 
     private fun buildState(step: Int, loss: Float, valLoss: Float, best: Float, lr: Float, gNorm: Float, tps: Float, elapsed: Long, eta: Long, hist: List<Float>, phase: Phase, msg: String) =
@@ -260,12 +345,12 @@ object TrainingController {
         val T = B * S
         var total = 0f; var n = 0
         val input = IntArray(T); val target = IntArray(T)
-        val batches = (valSize / (B * (S + 1))).coerceAtMost(4)
+        val batches = (valSize / (B * (S + 1))).coerceIn(1, 4)
         for (it in 0 until batches) {
             val base = trainEnd + it * B * (S + 1)
             for (b in 0 until B) {
                 val st = base + b * (S + 1)
-                if (st + S + 1 >= corpus.size) break
+                if (st + S >= corpus.size) break
                 for (s in 0 until S) { input[b * S + s] = corpus[st + s]; target[b * S + s] = corpus[st + s + 1] }
             }
             val logits = m.forward(input, B, S, training = false)
@@ -276,7 +361,15 @@ object TrainingController {
 
     private fun saveCheckpoint(m: GPT, opt: AdamW, tok: Tokenizer, step: Int, best: Float, patience: Int, hist: List<Float>, tokensSeen: Long) {
         checkpointManager.save(m, opt, tok, CheckpointManager.Meta(step, step, best, patience, hist.takeLast(500), tokensSeen))
+        resumeCheckpointCompatible = true
     }
 
-    fun clearCheckpoint() { checkpointManager.clear(); model = null; tokenizer = null; corpus = IntArray(0); _state.value = TrainState() }
+    fun clearCheckpoint() {
+        checkpointManager.clear()
+        resumeCheckpointCompatible = false
+        model = null
+        tokenizer = null
+        corpus = IntArray(0)
+        _state.value = TrainState()
+    }
 }

@@ -10,6 +10,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -35,95 +36,174 @@ import com.Nexora.ai.ui.theme.NexoraMuted
 import com.Nexora.ai.ui.theme.NexoraPrimary
 
 private fun fmtMs(ms: Long): String {
-    val s = ms / 1000
-    return "%02d:%02d:%02d".format(s / 3600, (s % 3600) / 60, s % 60)
+    val seconds = ms.coerceAtLeast(0L) / 1000L
+    return "%02d:%02d:%02d".format(seconds / 3600, (seconds % 3600) / 60, seconds % 60)
 }
 
 @Composable
 fun TrainScreen() {
-    val s by TrainingController.state.collectAsState()
+    val state by TrainingController.state.collectAsState()
     val hp by AppSettings.hp.collectAsState()
-    val running = s.phase == Phase.RUNNING || s.phase == Phase.PAUSED
-    Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        GradientLabel("Training")
-        Text(s.message, color = NexoraMuted, fontSize = 12.sp)
+    val stats = NativeOps.computeStats()
+    val running = state.phase == Phase.RUNNING
+    val paused = state.phase == Phase.PAUSED
+    val settingsEnabled = !running && !paused
+    val canStart = state.numTokens > 0 &&
+        state.phase in setOf(Phase.READY, Phase.IDLE, Phase.FINISHED, Phase.EARLY_STOPPED, Phase.ERROR)
 
-        // Controls
+    Column(
+        Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        GradientLabel("Training")
+        Text(
+            when (state.phase) {
+                Phase.IDLE -> "Belum siap — impor dataset terlebih dahulu."
+                Phase.IMPORTING -> "Dataset sedang diproses."
+                Phase.READY -> "Model dan dataset siap untuk training."
+                Phase.RUNNING -> "Training aktif di perangkat. Fase kerja ditampilkan di bawah."
+                Phase.PAUSED -> "Training dijeda; tekan Resume untuk melanjutkan."
+                Phase.EARLY_STOPPED -> "Training berhenti otomatis karena validation loss tidak membaik."
+                Phase.FINISHED -> "Batas step tercapai; checkpoint akhir tersimpan."
+                Phase.ERROR -> "Training mengalami masalah. Lihat pesan error di bawah."
+            },
+            color = NexoraMuted,
+            fontSize = 12.sp
+        )
+        Text(state.message, color = NexoraPrimary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+        if (running) LinearProgressIndicator(Modifier.fillMaxWidth())
+
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (!running) {
-                Button(onClick = { TrainingController.startTraining(hp) },
-                    enabled = s.phase == Phase.READY || s.phase == Phase.IDLE || s.phase == Phase.FINISHED || s.phase == Phase.EARLY_STOPPED,
+            if (!running && !paused) {
+                Button(
+                    onClick = { TrainingController.startTraining(hp) },
+                    enabled = canStart,
                     modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(containerColor = NexoraPrimary, contentColor = androidx.compose.ui.graphics.Color.Black)) {
-                    Text(if (s.step > 0) "Lanjutkan" else "Mulai", fontWeight = FontWeight.Bold)
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = NexoraPrimary,
+                        contentColor = androidx.compose.ui.graphics.Color.Black
+                    )
+                ) {
+                    Text(if (state.step > 0) "Lanjutkan training" else "Mulai training", fontWeight = FontWeight.Bold)
                 }
             }
-            if (s.phase == Phase.RUNNING) {
+            if (running) {
                 OutlinedButton(onClick = { TrainingController.pause() }, modifier = Modifier.weight(1f)) { Text("Jeda") }
             }
-            if (s.phase == Phase.PAUSED) {
-                Button(onClick = { TrainingController.resume() }, modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(containerColor = NexoraAmber, contentColor = androidx.compose.ui.graphics.Color.Black)) { Text("Resume") }
+            if (paused) {
+                Button(
+                    onClick = { TrainingController.resume() },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = NexoraAmber, contentColor = androidx.compose.ui.graphics.Color.Black)
+                ) { Text("Resume") }
             }
-            if (running) {
-                OutlinedButton(onClick = { TrainingController.stop() }, modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = NexoraDanger)) { Text("Stop") }
+            if (running || paused) {
+                OutlinedButton(
+                    onClick = { TrainingController.stop() },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = NexoraDanger)
+                ) { Text("Stop") }
             }
         }
+        if (state.numTokens <= 0) {
+            Text(
+                "Checkpoint menyimpan bobot, bukan dataset. Setelah aplikasi dibuka ulang, impor ulang dataset sebelum melanjutkan training.",
+                color = NexoraMuted,
+                fontSize = 11.sp
+            )
+        }
 
-        // Live stats
-        SectionTitle("Detail training (real)")
+        SectionTitle("Progres training")
         GlassCard {
-            KeyValueRow("Step", "${s.step}")
-            KeyValueRow("Loss", "%.5f".format(s.loss))
-            KeyValueRow("Val loss", "%.5f".format(s.valLoss))
-            KeyValueRow("Best val loss", "%.5f".format(if (s.bestValLoss == Float.MAX_VALUE) 0f else s.bestValLoss))
-            KeyValueRow("Learning rate", "%.2e".format(s.lr))
-            KeyValueRow("Grad norm", "%.4f".format(s.gradNorm))
-            KeyValueRow("Tokens/detik", "%.1f".format(s.tokensPerSec))
-            KeyValueRow("Elapsed", fmtMs(s.elapsedMs))
-            KeyValueRow("ETA", fmtMs(s.etaMs))
-            KeyValueRow("Checkpoint", "otomatis setiap ${hp.saveEvery} step")
+            KeyValueRow("Fase", state.phase.name)
+            KeyValueRow("Step selesai / target", "${state.step} / ${hp.maxSteps}")
+            KeyValueRow("Loss", "%.5f".format(state.loss))
+            KeyValueRow("Validation loss", "%.5f".format(state.valLoss))
+            KeyValueRow("Best validation loss", "%.5f".format(if (state.bestValLoss == Float.MAX_VALUE) 0f else state.bestValLoss))
+            KeyValueRow("Learning rate", "%.2e".format(state.lr))
+            KeyValueRow("Grad norm", "%.4f".format(state.gradNorm))
+            KeyValueRow("Kecepatan", "%.1f token/detik".format(state.tokensPerSec))
+            KeyValueRow("Waktu berjalan", fmtMs(state.elapsedMs))
+            KeyValueRow("Estimasi tersisa", fmtMs(state.etaMs))
+            KeyValueRow("Checkpoint", "Setiap ${hp.saveEvery} step")
         }
 
-        if (s.lossHistory.size > 1) {
+        SectionTitle("Backend komputasi yang benar-benar dipakai")
+        GlassCard {
+            KeyValueRow("GEMM CPU", "${stats.cpuGemmCalls} panggilan")
+            KeyValueRow("GEMM GPU berhasil", "${stats.gpuGemmCalls} panggilan")
+            KeyValueRow("Fallback GPU ke CPU", "${stats.gpuFallbacks} kali")
+            Text(
+                "Counter bergerak saat status training diperbarui. Operasi backward tertentu tetap berjalan di CPU; GPU tidak berarti seluruh training memakai GPU.",
+                color = NexoraMuted,
+                fontSize = 11.sp
+            )
+        }
+
+        if (state.lossHistory.size > 1) {
             SectionTitle("Kurva loss")
-            GlassCard { LossChart(s.lossHistory) }
+            GlassCard { LossChart(state.lossHistory) }
         }
 
-        // Hyperparameters
-        SectionTitle("Hyperparameter")
+        SectionTitle("Pengaturan training")
+        Text(
+            "Pengaturan disimpan otomatis untuk sesi berikutnya. Max steps adalah jumlah update bobot, bukan jumlah epoch. Pengaturan dikunci selama training agar target tidak berubah diam-diam.",
+            color = NexoraMuted,
+            fontSize = 12.sp
+        )
         GlassCard {
-            LabeledSlider("Learning rate", hp.learningRate.toDouble(), 1e-5..1e-2, { "%.2e".format(it) }) {
+            LabeledSlider("Learning rate", hp.learningRate.toDouble(), 1e-5..1e-2, { "%.2e".format(it) }, enabled = settingsEnabled) {
                 AppSettings.updateHp { p -> p.copy(learningRate = it.toFloat()) }
             }
-            LabeledSlider("Batch size", hp.batchSize.toDouble(), 1.0..16.0, { "%.0f".format(it) }) {
-                AppSettings.updateHp { p -> p.copy(batchSize = it.toInt()) }
+            LabeledSlider("Batch size", hp.batchSize.toDouble(), 1.0..16.0, { "%.0f".format(it) }, enabled = settingsEnabled) {
+                AppSettings.updateHp { p -> p.copy(batchSize = it.toInt().coerceIn(1, 16)) }
             }
-            LabeledSlider("Warmup steps", hp.warmupSteps.toDouble(), 0.0..500.0, { "%.0f".format(it) }) {
-                AppSettings.updateHp { p -> p.copy(warmupSteps = it.toInt()) }
+            LabeledSlider("Warmup steps", hp.warmupSteps.toDouble(), 0.0..500.0, { "%.0f".format(it) }, enabled = settingsEnabled) {
+                AppSettings.updateHp { p -> p.copy(warmupSteps = it.toInt().coerceIn(0, 500)) }
             }
-            LabeledSlider("Max steps", hp.maxSteps.toDouble(), 500.0..20000.0, { "%.0f".format(it) }) {
-                AppSettings.updateHp { p -> p.copy(maxSteps = it.toInt()) }
+            LabeledSlider("Max training steps", hp.maxSteps.toDouble(), 500.0..20000.0, { "%.0f".format(it) }, enabled = settingsEnabled) {
+                AppSettings.updateHp { p -> p.copy(maxSteps = it.toInt().coerceIn(500, 20000)) }
             }
-            LabeledSlider("Early-stop patience", hp.patience.toDouble(), 1.0..20.0, { "%.0f".format(it) }) {
-                AppSettings.updateHp { p -> p.copy(patience = it.toInt()) }
+            LabeledSlider("Validation setiap N step", hp.evalEvery.toDouble(), 25.0..500.0, { "%.0f".format(it) }, enabled = settingsEnabled) {
+                AppSettings.updateHp { p -> p.copy(evalEvery = it.toInt().coerceAtLeast(1)) }
             }
-            LabeledSlider("Grad clip", hp.gradClip.toDouble(), 0.5..5.0, { "%.1f".format(it) }) {
-                AppSettings.updateHp { p -> p.copy(gradClip = it.toFloat()) }
+            LabeledSlider("Simpan checkpoint setiap N step", hp.saveEvery.toDouble(), 25.0..1000.0, { "%.0f".format(it) }, enabled = settingsEnabled) {
+                AppSettings.updateHp { p -> p.copy(saveEvery = it.toInt().coerceAtLeast(1)) }
             }
-            LabeledSlider("Thread CPU", hp.numThreads.toDouble(), 0.0..NativeOps.nativeCpuCores().toDouble(), { if (it == 0.0) "semua core" else "%.0f".format(it) }) {
-                AppSettings.updateHp { p -> p.copy(numThreads = it.toInt()) }
+            LabeledSlider("Early-stop patience", hp.patience.toDouble(), 1.0..20.0, { "%.0f".format(it) }, enabled = settingsEnabled) {
+                AppSettings.updateHp { p -> p.copy(patience = it.toInt().coerceIn(1, 20)) }
+            }
+            LabeledSlider("Gradient clipping", hp.gradClip.toDouble(), 0.5..5.0, { "%.1f".format(it) }, enabled = settingsEnabled) {
+                AppSettings.updateHp { p -> p.copy(gradClip = it.toFloat().coerceIn(0.5f, 5f)) }
+            }
+            LabeledSlider(
+                "Thread CPU (0 = otomatis/semua core)",
+                hp.numThreads.toDouble(),
+                0.0..NativeOps.nativeCpuCores().toDouble(),
+                { if (it == 0.0) "Otomatis" else "%.0f".format(it) },
+                enabled = settingsEnabled
+            ) {
+                AppSettings.updateHp { p -> p.copy(numThreads = it.toInt().coerceIn(0, NativeOps.nativeCpuCores())) }
             }
         }
-        Text("Fitur aktif: LoRA (rank dapat diatur di Lab), dropout, AdamW + cosine LR schedule, gradient clipping, early stopping, checkpoint periodik.",
-            color = NexoraMuted, fontSize = 11.sp)
     }
 }
 
 @Composable
-private fun LabeledSlider(label: String, value: Double, range: ClosedFloatingPointRange<Double>, fmt: (Double) -> String, onChange: (Double) -> Unit) {
+private fun LabeledSlider(
+    label: String,
+    value: Double,
+    range: ClosedFloatingPointRange<Double>,
+    fmt: (Double) -> String,
+    enabled: Boolean = true,
+    onChange: (Double) -> Unit
+) {
     Text("$label: ${fmt(value)}", fontSize = 13.sp, color = com.Nexora.ai.ui.theme.NexoraOnSurface)
-    val fr = range.start.toFloat()..range.endInclusive.toFloat()
-    Slider(value = value.toFloat().coerceIn(fr), valueRange = fr, onValueChange = { onChange(it.toDouble()) })
+    val floatRange = range.start.toFloat()..range.endInclusive.toFloat()
+    Slider(
+        value = value.toFloat().coerceIn(floatRange),
+        valueRange = floatRange,
+        enabled = enabled,
+        onValueChange = { onChange(it.toDouble()) }
+    )
 }

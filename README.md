@@ -6,7 +6,7 @@ langsung di ponsel. Tanpa cloud API, tanpa mock, tanpa contoh bawaan, tanpa kata
 checkpoint periodik sehingga **bobot terus bertambah** antar sesi.
 
 ## Toolchain
-- JDK 25 (`jvmToolchain(25)`)
+- JDK 25 for the Gradle/Kotlin build toolchain; Android bytecode target remains Java 21
 - Gradle 9.8.1 (wrapper)
 - AGP 9.4.0
 - NDK r30 LTS (`ndkVersion "30.0.16248370"`)
@@ -16,7 +16,7 @@ checkpoint periodik sehingga **bobot terus bertambah** antar sesi.
 ## Cara build
 1. Buka folder ini di Android Studio (2026.x / Iguana+). Studio akan mengambil
    Gradle 9.8.1 + dependensi secara otomatis.
-2. Pastikan SDK Platform 37, NDK r30, dan CMake terpasang (SDK Manager).
+2. Pastikan SDK Platform 37 (`android.jar`), NDK r30, dan CMake terpasang. CI memeriksa `android.jar` agar instalasi SDK yang tidak lengkap tidak lolos diam-diam.
 3. `./gradlew :app:assembleDebug` (atau Build > Make Project).
 4. Instal di perangkat Android 8.0+ (minSdk 26). GPU compute opsional.
 
@@ -31,7 +31,7 @@ checkpoint periodik sehingga **bobot terus bertambah** antar sesi.
 | Early stopping pada validation loss (patience dapat diatur) | `TrainingController.trainLoop` |
 | Checkpoint periodik + resume bobot/optimizer/tokenizer | `data/CheckpointManager.kt` |
 | Impor dataset streaming JSONL / CSV / TXT, maks 500 MB, vocab 16k dibangun dari dataset | `data/DatasetImporter.kt`, `data/Tokenizer.kt` |
-| Detail training live: loss, val loss, best, LR, grad norm, token/detik, elapsed, ETA, kurva loss | `ui/screens/TrainScreen.kt` |
+| Status fase training (forward/backprop/optimizer/evaluasi/checkpoint), error terlihat, loss, val loss, LR, grad norm, token/detik, elapsed, ETA, kurva loss | `ui/screens/TrainScreen.kt` |
 | Chat dengan model hasil latihan (generasi token-per-token, top-k sampling) | `ml/Inference.kt`, `ui/screens/ChatScreen.kt` |
 | Benchmark nyata: CPU GFLOPS (NEON+thread), GPU GFLOPS (GLES compute), throughput training, info perangkat & RAM | `benchmark/BenchmarkRunner.kt`, `cpp/gles_compute.cpp` |
 | Maksimalkan CPU: thread pool sejumlah core, NEON intrinsik, `largeHeap=true` | `cpp/native.cpp`, `AndroidManifest.xml` |
@@ -45,6 +45,8 @@ checkpoint periodik sehingga **bobot terus bertambah** antar sesi.
 - Nama aplikasi: `Nexora` (`@string/app_name`)
 
 ## Catatan
+- LiteRT adalah runtime inferensi/delegates, bukan pengganti langsung untuk melatih transformer custom FloatArray ini. Integrasi membutuhkan jalur ekspor model yang kompatibel, sehingga dependency LiteRT tidak ditambahkan sekadar sebagai label GPU.
+- Workflow CI menjalankan Gradle dengan JDK 25 tetapi menghasilkan bytecode Java 21. Instalasi Android API 37 diverifikasi dengan pemeriksaan `android.jar`.
 - Tidak ada permission INTERNET → aplikasi sepenuhnya offline.
 - Tokenizer dibangun dari dataset yang Anda impor (word-level + byte fallback).
 - Untuk kecepatan terbaik, gunakan LoRA (default aktif) — trainable params jauh

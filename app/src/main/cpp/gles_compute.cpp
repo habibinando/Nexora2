@@ -74,8 +74,9 @@ struct GpuState {
         const char* ver = (const char*)glGetString(GL_VERSION);
         const char* rend = (const char*)glGetString(GL_RENDERER);
         info = std::string(ver ? ver : "?") + " | " + (rend ? rend : "?");
-        int major = 0; if (ver) sscanf(ver, "OpenGL ES %d.", &major);
-        if (major < 3) { eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT); return false; }
+        int major = 0, minor = 0;
+        if (ver) sscanf(ver, "OpenGL ES %d.%d", &major, &minor);
+        if (major < 3 || (major == 3 && minor < 1)) { eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT); return false; }
 
         GLuint sh = glCreateShader(GL_COMPUTE_SHADER);
         glShaderSource(sh, 1, &COMPUTE_SRC, nullptr);
@@ -125,10 +126,13 @@ struct GpuState {
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, bufC);
         GLuint gx = (N + 15) / 16, gy = (M + 15) / 16;
         glDispatchCompute(gx, gy, 1);
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, bufC);
-        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, nc, C);
-        return true;
+        void* mapped = glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, static_cast<GLsizeiptr>(nc), GL_MAP_READ_BIT);
+        if (!mapped) return false;
+        std::memcpy(C, mapped, nc);
+        const GLboolean unmapped = glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+        return unmapped == GL_TRUE;
     }
 };
 
@@ -167,4 +171,43 @@ Java_com_Nexora_ai_ml_NativeOps_nativeGpuBench(
     glFinish();
     auto t1 = std::chrono::steady_clock::now();
     return std::chrono::duration<double, std::milli>(t1 - t0).count() / iter;
+}
+
+
+// Large forward GEMMs may use the GLES backend. The caller falls back to the
+// optimized CPU implementation when initialization or execution is unavailable.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_Nexora_ai_ml_NativeOps_nativeGpuMatMul(
+        JNIEnv* env, jclass, jfloatArray aArr, jfloatArray bArr, jfloatArray cArr,
+        jint M, jint K, jint N) {
+    if (M <= 0 || K <= 0 || N <= 0) return JNI_FALSE;
+    const jlong aNeed = static_cast<jlong>(M) * K;
+    const jlong bNeed = static_cast<jlong>(K) * N;
+    const jlong cNeed = static_cast<jlong>(M) * N;
+    if (env->GetArrayLength(aArr) < aNeed ||
+        env->GetArrayLength(bArr) < bNeed ||
+        env->GetArrayLength(cArr) < cNeed) return JNI_FALSE;
+
+    auto* s = state();
+    if (!s->ok) return JNI_FALSE;
+
+    jfloat* A = env->GetFloatArrayElements(aArr, nullptr);
+    if (!A) return JNI_FALSE;
+    jfloat* B = env->GetFloatArrayElements(bArr, nullptr);
+    if (!B) {
+        env->ReleaseFloatArrayElements(aArr, A, JNI_ABORT);
+        return JNI_FALSE;
+    }
+    jfloat* C = env->GetFloatArrayElements(cArr, nullptr);
+    if (!C) {
+        env->ReleaseFloatArrayElements(aArr, A, JNI_ABORT);
+        env->ReleaseFloatArrayElements(bArr, B, JNI_ABORT);
+        return JNI_FALSE;
+    }
+
+    const bool ok = s->matmul(A, B, C, M, K, N);
+    env->ReleaseFloatArrayElements(aArr, A, JNI_ABORT);
+    env->ReleaseFloatArrayElements(bArr, B, JNI_ABORT);
+    env->ReleaseFloatArrayElements(cArr, C, ok ? 0 : JNI_ABORT);
+    return ok ? JNI_TRUE : JNI_FALSE;
 }
