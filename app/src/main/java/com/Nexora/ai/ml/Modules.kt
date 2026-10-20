@@ -13,7 +13,7 @@ data class ModelConfig(
     val numHeads: Int = 8,
     val numLayers: Int = 32,
     val dropout: Float = 0.1f,
-    val useLora: Boolean = true,
+    val useLora: Boolean = false,
     val loraRank: Int = 8,
     val loraAlpha: Int = 16,
     val layerNormEps: Float = 1e-5f
