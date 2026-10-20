@@ -69,6 +69,8 @@ fun LabScreen() {
 
     LaunchedEffect(Unit) { gpuInfo = withContext(Dispatchers.IO) { NativeOps.gpuInfo() } }
     val validHeads = (2..16).filter { cfg.dModel % it == 0 }.ifEmpty { listOf(1) }
+    val resetAllowed = !benchBusy &&
+        train.phase !in setOf(Phase.RUNNING, Phase.PAUSED, Phase.IMPORTING)
 
     Column(
         Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()),
@@ -204,10 +206,18 @@ fun LabScreen() {
         SectionTitle("Penyimpanan model")
         OutlinedButton(
             onClick = { confirmReset = true },
+            enabled = resetAllowed,
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.outlinedButtonColors(contentColor = NexoraDanger)
         ) { Text("Hapus checkpoint & reset model") }
-        Text("Ini menghapus bobot, optimizer state, tokenizer, dan metadata checkpoint. Dataset sumber tidak dihapus.", color = NexoraMuted, fontSize = 11.sp)
+        Text(
+            if (resetAllowed)
+                "Ini menghapus bobot, optimizer state, tokenizer, dan metadata checkpoint. Dataset sumber tidak dihapus."
+            else
+                "Reset dinonaktifkan saat training, impor dataset, atau benchmark aktif.",
+            color = NexoraMuted,
+            fontSize = 11.sp
+        )
     }
 
     if (confirmReset) {
@@ -216,7 +226,7 @@ fun LabScreen() {
             title = { Text("Hapus checkpoint?") },
             text = { Text("Bobot hasil training dan metadata akan dihapus. Tindakan ini tidak bisa dibatalkan.") },
             confirmButton = {
-                TextButton(onClick = {
+                TextButton(enabled = resetAllowed, onClick = {
                     TrainingController.clearCheckpoint()
                     benchResult = null
                     confirmReset = false
