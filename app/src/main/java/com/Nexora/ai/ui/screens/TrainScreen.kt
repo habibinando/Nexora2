@@ -40,6 +40,7 @@ import com.Nexora.ai.ui.theme.NexoraMuted
 import com.Nexora.ai.ui.theme.NexoraOnSurface
 import com.Nexora.ai.ui.theme.NexoraSurfaceVar
 import com.Nexora.ai.ui.theme.NexoraPrimary
+import java.util.Locale
 
 private fun fmtMs(ms: Long): String {
     val seconds = ms.coerceAtLeast(0L) / 1000L

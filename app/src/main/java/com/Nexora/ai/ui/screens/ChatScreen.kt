@@ -74,6 +74,7 @@ fun ChatScreen() {
     val state by TrainingController.state.collectAsState()
     val model = TrainingController.model
     val tokenizer = TrainingController.tokenizer
+    val modelReady = model != null && tokenizer != null
     val messages = remember { mutableStateListOf<Msg>() }
     var input by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
