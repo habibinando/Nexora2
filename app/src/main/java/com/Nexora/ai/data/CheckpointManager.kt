@@ -16,7 +16,19 @@ import java.io.FileOutputStream
  */
 class CheckpointManager(private val dir: File) {
 
-    init { dir.mkdirs() }
+    init {
+        val parent = dir.parentFile
+        if (parent != null) {
+            parent.mkdirs()
+            val staging = File(parent, dir.name + ".staging")
+            val backup = File(parent, dir.name + ".backup")
+            // Recover the prior complete checkpoint if the process died mid-swap.
+            if (!dir.exists() && backup.exists()) backup.renameTo(dir)
+            if (staging.exists()) staging.deleteRecursively()
+            if (dir.exists() && backup.exists()) backup.deleteRecursively()
+        }
+        dir.mkdirs()
+    }
 
     data class Meta(
         val step: Int, val epoch: Int, val bestValLoss: Float,
@@ -25,27 +37,58 @@ class CheckpointManager(private val dir: File) {
     )
 
     fun save(model: GPT, optimizer: AdamW, tokenizer: Tokenizer, meta: Meta) {
-        DataOutputStream(FileOutputStream(File(dir, "config.bin"))).use { o ->
-            val c = model.cfg
-            o.writeInt(c.vocabSize); o.writeInt(c.seqLen); o.writeInt(c.dModel); o.writeInt(c.ffnDim)
-            o.writeInt(c.numHeads); o.writeInt(c.numLayers); o.writeFloat(c.dropout)
-            o.writeBoolean(c.useLora); o.writeInt(c.loraRank); o.writeInt(c.loraAlpha); o.writeFloat(c.layerNormEps)
+        val parent = dir.parentFile ?: throw IllegalStateException("Checkpoint directory has no parent")
+        if (!parent.exists() && !parent.mkdirs()) {
+            throw IllegalStateException("Cannot create checkpoint parent directory")
         }
-        DataOutputStream(FileOutputStream(File(dir, "tokenizer.bin"))).use { tokenizer.save(it) }
-        DataOutputStream(FileOutputStream(File(dir, "tensors.bin"))).use { o ->
-            for (t in model.allTensors()) { o.writeInt(t.size); for (v in t) o.writeFloat(v) }
-        }
-        DataOutputStream(FileOutputStream(File(dir, "optimizer.bin"))).use { o ->
-            o.writeInt(optimizer.step)
-            for ((m, v) in optimizer.state()) {
-                o.writeInt(m.size); for (x in m) o.writeFloat(x)
-                o.writeInt(v.size); for (x in v) o.writeFloat(x)
+        val staging = File(parent, dir.name + ".staging")
+        val backup = File(parent, dir.name + ".backup")
+        staging.deleteRecursively()
+        if (!staging.mkdirs()) throw IllegalStateException("Cannot create checkpoint staging directory")
+
+        try {
+            DataOutputStream(FileOutputStream(File(staging, "config.bin"))).use { o ->
+                val c = model.cfg
+                o.writeInt(c.vocabSize); o.writeInt(c.seqLen); o.writeInt(c.dModel); o.writeInt(c.ffnDim)
+                o.writeInt(c.numHeads); o.writeInt(c.numLayers); o.writeFloat(c.dropout)
+                o.writeBoolean(c.useLora); o.writeInt(c.loraRank); o.writeInt(c.loraAlpha); o.writeFloat(c.layerNormEps)
             }
-        }
-        DataOutputStream(FileOutputStream(File(dir, "meta.bin"))).use { o ->
-            o.writeInt(meta.step); o.writeInt(meta.epoch); o.writeFloat(meta.bestValLoss)
-            o.writeInt(meta.patienceCount); o.writeLong(meta.tokensSeen)
-            o.writeInt(meta.lossHistory.size); for (l in meta.lossHistory) o.writeFloat(l)
+            DataOutputStream(FileOutputStream(File(staging, "tokenizer.bin"))).use { tokenizer.save(it) }
+            DataOutputStream(FileOutputStream(File(staging, "tensors.bin"))).use { o ->
+                for (tensor in model.allTensors()) {
+                    o.writeInt(tensor.size)
+                    for (value in tensor) o.writeFloat(value)
+                }
+            }
+            DataOutputStream(FileOutputStream(File(staging, "optimizer.bin"))).use { o ->
+                o.writeInt(optimizer.step)
+                for ((m, v) in optimizer.state()) {
+                    o.writeInt(m.size); for (value in m) o.writeFloat(value)
+                    o.writeInt(v.size); for (value in v) o.writeFloat(value)
+                }
+            }
+            DataOutputStream(FileOutputStream(File(staging, "meta.bin"))).use { o ->
+                o.writeInt(meta.step); o.writeInt(meta.epoch); o.writeFloat(meta.bestValLoss)
+                o.writeInt(meta.patienceCount); o.writeLong(meta.tokensSeen)
+                o.writeInt(meta.lossHistory.size)
+                for (loss in meta.lossHistory) o.writeFloat(loss)
+            }
+
+            // Swap the whole directory only after every checkpoint file has closed successfully.
+            backup.deleteRecursively()
+            val hadPrevious = dir.exists()
+            if (hadPrevious && !dir.renameTo(backup)) {
+                throw IllegalStateException("Cannot move previous checkpoint to backup")
+            }
+            if (!staging.renameTo(dir)) {
+                if (hadPrevious && backup.exists()) backup.renameTo(dir)
+                throw IllegalStateException("Cannot publish complete checkpoint")
+            }
+            backup.deleteRecursively()
+        } catch (failure: Throwable) {
+            staging.deleteRecursively()
+            if (!dir.exists() && backup.exists()) backup.renameTo(dir)
+            throw failure
         }
     }
 
@@ -102,5 +145,13 @@ class CheckpointManager(private val dir: File) {
         }
     } catch (_: Exception) { null }
 
-    fun clear() { dir.listFiles()?.forEach { it.delete() } }
+    fun clear() {
+        val parent = dir.parentFile
+        dir.deleteRecursively()
+        if (parent != null) {
+            File(parent, dir.name + ".staging").deleteRecursively()
+            File(parent, dir.name + ".backup").deleteRecursively()
+        }
+        dir.mkdirs()
+    }
 }
