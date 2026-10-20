@@ -267,19 +267,16 @@ object DatasetImporter {
                                     // No recognized header: treat the first row as actual data.
                                     csvTextColumns = columns.indices.toList()
                                     csvTextLabels = emptyList()
-                                    columns.filter { it.isNotBlank() }.joinToString("\\n").ifBlank { null }
+                                    columns.filter { it.isNotBlank() }.joinToString("\n").ifBlank { null }
                                 }
                             } else {
-                                val values = csvTextColumns.mapNotNull { index ->
-                                    columns.getOrNull(index)?.takeIf { it.isNotBlank() }
+                                val values = csvTextColumns.mapIndexedNotNull { labelIndex, columnIndex ->
+                                    val value = columns.getOrNull(columnIndex)?.takeIf { it.isNotBlank() }
+                                        ?: return@mapIndexedNotNull null
+                                    val label = csvTextLabels.getOrNull(labelIndex)
+                                    if (label == null) value else "$label: $value"
                                 }
-                                if (csvTextLabels.isEmpty()) {
-                                    values.joinToString("\\n").ifBlank { null }
-                                } else {
-                                    values.mapIndexed { index, value ->
-                                        "${csvTextLabels.getOrElse(index) { "text" }}: $value"
-                                    }.joinToString("\\n").ifBlank { null }
-                                }
+                                values.joinToString("\n").ifBlank { null }
                             }
                         }
                         else -> line
