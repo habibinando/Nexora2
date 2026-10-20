@@ -2,6 +2,7 @@ package com.Nexora.ai.data
 
 import android.content.Context
 import android.net.Uri
+import android.provider.OpenableColumns
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -36,6 +37,10 @@ object DatasetImporter {
     )
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+    private val TEXT_HEADERS = setOf(
+        "text", "content", "message", "prompt", "input", "instruction",
+        "output", "completion", "response", "answer", "question"
+    )
 
     /** Bounded Space-Saving counters keep frequent candidate pieces with bounded memory. */
     private class BoundedFrequencies(private val capacity: Int) {
@@ -124,7 +129,15 @@ object DatasetImporter {
             throw IllegalArgumentException("Dataset melebihi batas 500 MiB.")
         }
 
-        val name = uri.lastPathSegment?.substringAfterLast(':')?.lowercase().orEmpty()
+        val displayName = try {
+            context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0) else null
+            }
+        } catch (_: Exception) {
+            null
+        }
+        val name = (displayName?.takeIf { it.isNotBlank() } ?: uri.lastPathSegment.orEmpty())
+            .substringAfterLast('/').substringAfterLast(':').lowercase()
         val format = when {
             name.endsWith(".jsonl") || name.endsWith(".json") -> "jsonl"
             name.endsWith(".csv") -> "csv"
@@ -220,8 +233,9 @@ object DatasetImporter {
         var textRows = 0L
         var lineNumber = 0L
         var completedNormally = true
-        var header: List<String>? = null
-        var textColumn = 0
+        var csvHeaderResolved = false
+        var csvTextColumns = emptyList<Int>()
+        var csvTextLabels = emptyList<String>()
 
         val input = context.contentResolver.openInputStream(uri)
             ?: throw IllegalStateException("Tidak dapat membuka ulang dataset. Pilih file yang dapat dibaca dua kali.")
@@ -240,12 +254,32 @@ object DatasetImporter {
                         "jsonl" -> extractJsonText(line)
                         "csv", "tsv" -> {
                             val columns = parseCsvLine(line, delimiter)
-                            if (header == null) {
-                                header = columns
-                                textColumn = findTextCol(columns)
-                                null
+                            if (!csvHeaderResolved) {
+                                csvHeaderResolved = true
+                                val matches = columns.mapIndexedNotNull { index, column ->
+                                    index.takeIf { column.trim().lowercase() in TEXT_HEADERS }
+                                }
+                                if (matches.isNotEmpty()) {
+                                    csvTextColumns = matches
+                                    csvTextLabels = matches.map { columns[it].trim() }
+                                    null // A recognized header row is metadata, not training text.
+                                } else {
+                                    // No recognized header: treat the first row as actual data.
+                                    csvTextColumns = columns.indices.toList()
+                                    csvTextLabels = emptyList()
+                                    columns.filter { it.isNotBlank() }.joinToString("\\n").ifBlank { null }
+                                }
                             } else {
-                                columns.getOrNull(textColumn)
+                                val values = csvTextColumns.mapNotNull { index ->
+                                    columns.getOrNull(index)?.takeIf { it.isNotBlank() }
+                                }
+                                if (csvTextLabels.isEmpty()) {
+                                    values.joinToString("\\n").ifBlank { null }
+                                } else {
+                                    values.mapIndexed { index, value ->
+                                        "${csvTextLabels.getOrElse(index) { "text" }}: $value"
+                                    }.joinToString("\\n").ifBlank { null }
+                                }
                             }
                         }
                         else -> line
@@ -320,14 +354,6 @@ object DatasetImporter {
         }
     }
 
-    private fun findTextCol(columns: List<String>): Int {
-        columns.forEachIndexed { index, column ->
-            if (column.trim().lowercase() in setOf("text", "content", "message", "prompt", "input", "instruction")) {
-                return index
-            }
-        }
-        return (columns.size - 1).coerceAtLeast(0)
-    }
 
     /** CSV/TSV line parser with quoted fields and escaped double quotes. */
     fun parseCsvLine(line: String, delimiter: Char = ','): List<String> {
