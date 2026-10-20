@@ -18,6 +18,21 @@ data class ModelConfig(
     val loraAlpha: Int = 16,
     val layerNormEps: Float = 1e-5f
 ) {
+    init {
+        require(vocabSize in 260..65_536) { "vocabSize must be between 260 and 65536" }
+        require(seqLen in 16..512) { "seqLen must be between 16 and 512" }
+        require(dModel in 32..1024) { "dModel must be between 32 and 1024" }
+        require(ffnDim in 32..4096) { "ffnDim must be between 32 and 4096" }
+        require(numLayers in 1..64) { "numLayers must be between 1 and 64" }
+        require(numHeads in 1..32 && dModel % numHeads == 0) {
+            "numHeads must divide dModel exactly"
+        }
+        require(dropout.isFinite() && dropout in 0f..0.5f) { "dropout must be between 0 and 0.5" }
+        require(loraRank in 1..64) { "loraRank must be between 1 and 64" }
+        require(loraAlpha in 1..256) { "loraAlpha must be between 1 and 256" }
+        require(layerNormEps.isFinite() && layerNormEps > 0f) { "layerNormEps must be finite and positive" }
+    }
+
     val headDim: Int get() = dModel / numHeads
 }
 
