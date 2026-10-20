@@ -1,9 +1,14 @@
 package com.Nexora.ai.ui
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.LinearEasing
@@ -54,6 +59,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -86,11 +92,25 @@ class MainActivity : ComponentActivity() {
         setContent {
             NexoraTheme {
                 var ready by remember { mutableStateOf(false) }
+                val notificationPermissionLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestPermission()
+                ) { /* The Train tab also exposes a manual permission/settings action if declined. */ }
                 LaunchedEffect(Unit) {
                     // The Application has loaded the checkpoint; this confirms native CPU thread-pool readiness.
                     NativeOps.nativeSetThreads(NativeOps.nativeCpuCores())
                     delay(1200) // let the loading screen breathe
                     ready = true
+                }
+                LaunchedEffect(ready) {
+                    // Android 13+ requires an explicit runtime request; a manifest entry alone is insufficient.
+                    if (ready && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                        ContextCompat.checkSelfPermission(
+                            this@MainActivity, Manifest.permission.POST_NOTIFICATIONS
+                        ) != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        delay(350)
+                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    }
                 }
                 Box(Modifier.fillMaxSize().background(NexoraBg)) {
                     if (ready) MainScaffold() else LoadingScreen()
