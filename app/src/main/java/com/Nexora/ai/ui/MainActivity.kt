@@ -84,7 +84,7 @@ class MainActivity : ComponentActivity() {
             NexoraTheme {
                 var ready by remember { mutableStateOf(false) }
                 LaunchedEffect(Unit) {
-                    // Real initialization: touch native lib + thread pool + checkpoint scan.
+                    // The Application has loaded the checkpoint; this confirms native CPU thread-pool readiness.
                     NativeOps.nativeSetThreads(NativeOps.nativeCpuCores())
                     delay(1200) // let the loading screen breathe
                     ready = true
