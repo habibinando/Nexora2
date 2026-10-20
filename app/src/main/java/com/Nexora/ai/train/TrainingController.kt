@@ -3,6 +3,7 @@ package com.Nexora.ai.train
 import android.app.ActivityManager
 import android.content.Context
 import android.net.Uri
+import android.os.SystemClock
 import com.Nexora.ai.data.CheckpointManager
 import com.Nexora.ai.data.DatasetImporter
 import com.Nexora.ai.data.Tokenizer
@@ -74,7 +75,11 @@ data class TrainState(
     val vocabSize: Int = 16000,
     val totalParams: Long = 0,
     val trainableParams: Long = 0,
-    val importProgress: Float = 0f
+    val importProgress: Float = 0f,
+    /** Current internal operation being executed, updated by the training loop. */
+    val operation: String = "",
+    /** Monotonic duration of the current operation; refreshed while work is in progress. */
+    val operationElapsedMs: Long = 0L
 )
 
 /**
@@ -100,6 +105,16 @@ object TrainingController {
     @Volatile private var stopped = false
     @Volatile private var resumeCheckpointCompatible = false
     @Volatile private var activeDatasetFingerprint: String = ""
+    @Volatile private var liveOperationLabel: String = "Menyiapkan training"
+    @Volatile private var liveOperationStartedAtMs: Long = 0L
+    private var heartbeatJob: Job? = null
+
+    /** Publish a real operation boundary and restart its monotonic stage timer. */
+    private fun reportOperation(label: String) {
+        liveOperationLabel = label
+        liveOperationStartedAtMs = SystemClock.elapsedRealtime()
+        _state.value = _state.value.copy(operation = label, operationElapsedMs = 0L)
+    }
 
     private fun estimateModelParams(cfg: ModelConfig): Long {
         val d = cfg.dModel.toLong()
@@ -336,9 +351,26 @@ object TrainingController {
             batchInEpoch = 0,
             batchesInEpoch = 0,
             totalEpochs = hp.epochs,
+            operation = "Menyiapkan training per epoch",
+            operationElapsedMs = 0L,
             message = "Menyiapkan training per epoch…"
         )
+        reportOperation("Menyiapkan runtime training")
         job = scope.launch {
+            heartbeatJob?.cancel()
+            heartbeatJob = scope.launch {
+                // 10 Hz keeps the timer visible without flooding Compose with updates.
+                while (true) {
+                    delay(100)
+                    if (_state.value.phase == Phase.RUNNING) {
+                        val now = SystemClock.elapsedRealtime()
+                        _state.value = _state.value.copy(
+                            operation = liveOperationLabel,
+                            operationElapsedMs = (now - liveOperationStartedAtMs).coerceAtLeast(0L)
+                        )
+                    }
+                }
+            }
             try {
                 trainLoop(m, hp)
             } catch (e: CancellationException) {
@@ -353,6 +385,9 @@ object TrainingController {
                     phase = Phase.ERROR,
                     message = "Training gagal: ${e.message ?: e::class.java.simpleName}"
                 )
+            } finally {
+                heartbeatJob?.cancel()
+                heartbeatJob = null
             }
         }
     }
@@ -477,6 +512,7 @@ object TrainingController {
                 }
                 if (stopped) break
 
+                reportOperation("Menyiapkan batch ${batchIndex + 1}/$stepsPerEpoch · mengambil token input/target")
                 val begin = batchIndex * B
                 val actualBatch = minOf(B, starts.size - begin)
                 if (actualBatch <= 0) break
@@ -504,8 +540,10 @@ object TrainingController {
 
                 synchronized(m) {
                     val stepStart = System.currentTimeMillis()
+                    reportOperation("Zero-grad · membersihkan gradien batch")
                     m.zeroGrad()
-                    val logits = m.forward(input, actualBatch, S, training = true)
+                    val logits = m.forward(input, actualBatch, S, training = true, onProgress = ::reportOperation)
+                    reportOperation("Cross-entropy · menghitung loss dan gradien logits")
                     val loss = crossEntropy(logits, target, vocab, gradLogits)
                     if (!loss.isFinite()) {
                         _state.value = _state.value.copy(
@@ -519,8 +557,10 @@ object TrainingController {
                     _state.value = _state.value.copy(
                         message = "Epoch ${epochIndex + 1}/${hp.epochs} · batch ${batchIndex + 1}/$stepsPerEpoch — backpropagation…"
                     )
-                    m.backward(gradLogits)
+                    reportOperation("Backward · memulai propagasi gradien")
+                    m.backward(gradLogits, onProgress = ::reportOperation)
 
+                    reportOperation("Gradient norm · memeriksa dan clipping gradien")
                     val grads = pairs.map { it.second }
                     val gNorm = MathUtil.gradNorm(*grads.toTypedArray())
                     if (!gNorm.isFinite() || gNorm < 0f) {
@@ -542,6 +582,7 @@ object TrainingController {
                     // Scheduler progress is local to this requested training run; the
                     // optimizer keeps its own global step for AdamW bias correction.
                     val lr = scheduler.lrAt(scheduleStep)
+                    reportOperation("AdamW · memperbarui bobot pada optimizer step ${step + 1}")
                     optimizer.step(lr)
                     scheduleStep++
                     step = optimizer.step
@@ -566,7 +607,7 @@ object TrainingController {
                         _state.value = _state.value.copy(
                             message = "Epoch ${epochIndex + 1}/${hp.epochs} · evaluasi validation loss pada step $step…"
                         )
-                        valLoss = evaluate(m, vocab, trainEnd, B, S)
+                        valLoss = evaluate(m, vocab, trainEnd, B, S) { label -> reportOperation(label) }
                         if (!valLoss.isFinite()) {
                             _state.value = _state.value.copy(phase = Phase.ERROR, message = "Validation loss tidak valid; training dihentikan.")
                             saveLastValidCheckpoint(completedEpochs)
@@ -608,6 +649,7 @@ object TrainingController {
 
                     if (step % hp.saveEvery == 0) {
                         _state.value = _state.value.copy(message = "Menyimpan checkpoint di step $step…")
+                        reportOperation("Checkpoint · menyimpan bobot dan state optimizer pada step $step")
                         saveCheckpoint(m, optimizer, tok, step, completedEpochs, bestVal, patienceCount, history, tokensSeen)
                     }
                     if (shouldStopEarly) {
@@ -687,7 +729,10 @@ object TrainingController {
     )
 
     /** Evaluate a bounded number of deterministic windows from the held-out corpus tail. */
-    private fun evaluate(m: GPT, vocab: Int, trainEnd: Int, B: Int, S: Int): Float {
+    private fun evaluate(
+        m: GPT, vocab: Int, trainEnd: Int, B: Int, S: Int,
+        onProgress: (String) -> Unit = {}
+    ): Float {
         val valWindowCount = ((corpus.size - trainEnd - 1) / S).coerceAtLeast(0)
         if (valWindowCount <= 0) return Float.NaN
         val maxWindows = minOf(valWindowCount, B * 4)
@@ -695,6 +740,7 @@ object TrainingController {
         var totalTokens = 0L
         var offset = 0
         while (offset < maxWindows) {
+            onProgress("Validasi · batch ${offset + 1}/$maxWindows")
             val actualBatch = minOf(B, maxWindows - offset)
             val T = actualBatch * S
             val input = IntArray(T)
@@ -706,7 +752,7 @@ object TrainingController {
                     target[b * S + s] = corpus[start + s + 1]
                 }
             }
-            val logits = m.forward(input, actualBatch, S, training = false)
+            val logits = m.forward(input, actualBatch, S, training = false, onProgress = { stage -> onProgress("Validasi · $stage") })
             val gradLogits = FloatArray(T * vocab)
             val loss = crossEntropy(logits, target, vocab, gradLogits)
             if (!loss.isFinite()) return Float.NaN
