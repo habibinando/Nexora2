@@ -6,10 +6,34 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+val generatedVulkanAssets = layout.buildDirectory.dir("generated/vulkanAssets")
+val compileVulkanShader by tasks.registering(Exec::class) {
+    val shaderSource = file("src/main/shaders/matmul.comp")
+    val shaderOutput = generatedVulkanAssets.get().file("shaders/matmul.comp.spv").asFile
+    inputs.file(shaderSource)
+    outputs.file(shaderOutput)
+    doFirst {
+        if (!shaderSource.isFile) {
+            throw GradleException("Vulkan shader source is missing: ${shaderSource.absolutePath}")
+        }
+        shaderOutput.parentFile.mkdirs()
+        commandLine(
+            "glslc",
+            "--target-env=vulkan1.0",
+            "-O",
+            shaderSource.absolutePath,
+            "-o",
+            shaderOutput.absolutePath
+        )
+    }
+}
+
 android {
     namespace = "com.Nexora.ai"
     compileSdk = 37
     ndkVersion = "30.0.16248370" // NDK r30 LTS
+
+    sourceSets.getByName("main").assets.srcDir(generatedVulkanAssets)
 
     defaultConfig {
         applicationId = "com.Nexora.ai"
@@ -19,7 +43,6 @@ android {
         versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        shaders { glslcArgs += listOf("--target-env=vulkan1.0") }
         vectorDrawables { useSupportLibrary = true }
 
         externalNativeBuild {
@@ -69,6 +92,14 @@ android {
             path = file("src/main/cpp/CMakeLists.txt")
             version = "3.22.1"
         }
+    }
+}
+
+// Compile the compute shader explicitly: AGP does not reliably package .comp sources
+// as SPIR-V across plugin versions. The generated asset is included in debug and release APKs.
+tasks.configureEach {
+    if (name.startsWith("merge") && name.endsWith("Assets")) {
+        dependsOn(compileVulkanShader)
     }
 }
 
