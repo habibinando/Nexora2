@@ -117,7 +117,7 @@ class Tokenizer private constructor(
             for (i in 0 until n) {
                 if (input.readBoolean()) {
                     val word = input.readUTF()
-                    require(word.length <= 64) { "Tokenizer piece exceeds supported length" }
+                    require(word.length <= 65_535) { "Tokenizer piece exceeds supported length" }
                     idToWord[i] = word
                     if (i >= SPECIAL + BYTES) wordToId[word] = i
                 }
