@@ -92,27 +92,54 @@ object TrainingController {
         appContext = context.applicationContext
         checkpointManager = CheckpointManager(context.filesDir.resolve("checkpoint"))
         NativeOps.nativeSetThreads(NativeOps.nativeCpuCores())
-        // Resume weights if present ("bobot terus bertambah")
+        // Resume weights if present ("bobot terus bertambah"), but never let a
+        // corrupt or oversized checkpoint crash the whole application at startup.
         val cfg = checkpointManager.loadConfig()
         if (cfg != null) {
             AppSettings.updateModel { cfg }
-            val m = GPT(cfg)
-            if (checkpointManager.loadTensors(m)) {
-                model = m
-                tokenizer = checkpointManager.loadTokenizer()
-                val meta = checkpointManager.loadMeta()
+            try {
+                val restoredModel = GPT(cfg)
+                if (checkpointManager.loadTensors(restoredModel)) {
+                    model = restoredModel
+                    tokenizer = checkpointManager.loadTokenizer()
+                    val meta = checkpointManager.loadMeta()
+                    _state.value = _state.value.copy(
+                        phase = Phase.READY,
+                        step = meta?.step ?: 0,
+                        epoch = meta?.epoch ?: 0,
+                        bestValLoss = meta?.bestValLoss ?: Float.MAX_VALUE,
+                        lossHistory = meta?.lossHistory ?: emptyList(),
+                        vocabSize = cfg.vocabSize,
+                        totalParams = restoredModel.numParams,
+                        trainableParams = restoredModel.trainableParams,
+                        message = "Checkpoint dimuat — bobot tersimpan siap dilanjutkan."
+                    )
+                } else {
+                    _state.value = _state.value.copy(
+                        phase = Phase.ERROR,
+                        message = "Checkpoint bobot tidak lengkap atau tidak cocok dengan arsitektur."
+                    )
+                }
+            } catch (_: OutOfMemoryError) {
+                model = null
+                tokenizer = null
                 _state.value = _state.value.copy(
-                    phase = Phase.READY,
-                    step = meta?.step ?: 0,
-                    epoch = meta?.epoch ?: 0,
-                    bestValLoss = meta?.bestValLoss ?: Float.MAX_VALUE,
-                    lossHistory = meta?.lossHistory ?: emptyList(),
-                    vocabSize = cfg.vocabSize,
-                    totalParams = m.numParams,
-                    trainableParams = m.trainableParams,
-                    message = "Checkpoint dimuat — bobot tersimpan siap dilanjutkan."
+                    phase = Phase.ERROR,
+                    message = "Checkpoint terlalu besar untuk memori aplikasi. Hapus checkpoint atau pilih arsitektur lebih kecil."
+                )
+            } catch (e: Exception) {
+                model = null
+                tokenizer = null
+                _state.value = _state.value.copy(
+                    phase = Phase.ERROR,
+                    message = "Gagal memuat checkpoint: ${e.message ?: e::class.java.simpleName}"
                 )
             }
+        } else if (checkpointManager.hasCheckpoint()) {
+            _state.value = _state.value.copy(
+                phase = Phase.ERROR,
+                message = "Metadata checkpoint rusak atau tidak didukung. Hapus checkpoint untuk mulai ulang."
+            )
         }
     }
 
@@ -163,6 +190,11 @@ object TrainingController {
                         totalParams = m.numParams,
                         trainableParams = m.trainableParams,
                         datasetName = uri.lastPathSegment?.substringAfterLast('/') ?: "dataset"
+                    )
+                } catch (_: OutOfMemoryError) {
+                    _state.value = _state.value.copy(
+                        phase = Phase.ERROR,
+                        message = "RAM tidak cukup untuk mengimpor dataset atau membuat model. Gunakan dataset lebih kecil atau kurangi dimensi/layer."
                     )
                 } catch (e: Exception) {
                     _state.value = _state.value.copy(phase = Phase.ERROR, message = "Gagal impor: ${e.message}")
