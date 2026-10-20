@@ -17,6 +17,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /** Foreground service keeps the real training loop alive while screen is off. */
@@ -30,6 +32,18 @@ class TrainingService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var job: Job? = null
 
+    private data class NotificationSnapshot(
+        val phase: Phase,
+        val currentEpoch: Int,
+        val totalEpochs: Int,
+        val batchInEpoch: Int,
+        val batchesInEpoch: Int,
+        val loss: String,
+        val tokensPerSec: Int,
+        val operation: String,
+        val operationSeconds: Long
+    )
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -37,16 +51,49 @@ class TrainingService : Service() {
         createChannel()
         startForeground(NOTIF_ID, buildNotification("Nexora training", "Menyiapkan…"))
         job = scope.launch {
-            TrainingController.state.collectLatest { s ->
-                val nm = getSystemService(NotificationManager::class.java)
-                nm.notify(NOTIF_ID, buildNotification(
-                    "Nexora — epoch ${s.currentEpoch.coerceAtLeast(s.epoch)}/${s.totalEpochs}",
-                    "${s.phase.name} · batch ${s.batchInEpoch}/${s.batchesInEpoch} · ${if (s.loss.isFinite()) "loss ${String.format("%.4f", s.loss)}" else "loss belum tersedia"} · ${s.tokensPerSec.toInt()} tok/s"
-                ))
-                if (s.phase != Phase.RUNNING && s.phase != Phase.PAUSED) {
-                    stopSelf()
+            TrainingController.state
+                .map { s ->
+                    NotificationSnapshot(
+                        phase = s.phase,
+                        currentEpoch = s.currentEpoch.coerceAtLeast(s.epoch),
+                        totalEpochs = s.totalEpochs,
+                        batchInEpoch = s.batchInEpoch,
+                        batchesInEpoch = s.batchesInEpoch,
+                        loss = if (s.loss.isFinite()) String.format(java.util.Locale.US, "%.4f", s.loss) else "belum tersedia",
+                        tokensPerSec = s.tokensPerSec.toInt(),
+                        operation = s.operation,
+                        operationSeconds = s.operationElapsedMs / 1000L
+                    )
                 }
-            }
+                // Operation timer ticks every second, not every 100 ms, to avoid notification spam.
+                .distinctUntilChanged()
+                .collectLatest { s ->
+                    val nm = getSystemService(NotificationManager::class.java)
+                    val text = buildString {
+                        append(s.operation.ifBlank { s.phase.name })
+                        append(" · ")
+                        append(s.operationSeconds)
+                        append(" dtk · batch ")
+                        append(s.batchInEpoch)
+                        append("/")
+                        append(s.batchesInEpoch)
+                        append(" · loss ")
+                        append(s.loss)
+                        append(" · ")
+                        append(s.tokensPerSec)
+                        append(" tok/s")
+                    }
+                    nm.notify(
+                        NOTIF_ID,
+                        buildNotification(
+                            "Nexora — epoch ${s.currentEpoch}/${s.totalEpochs}",
+                            text
+                        )
+                    )
+                    if (s.phase != Phase.RUNNING && s.phase != Phase.PAUSED) {
+                        stopSelf()
+                    }
+                }
         }
     }
 
