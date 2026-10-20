@@ -188,6 +188,11 @@ fun LabScreen() {
                     onCheckedChange = { enabled -> AppSettings.updateModel { c -> c.copy(useLora = enabled) } }
                 )
             }
+            Text(
+                "Training dari nol: biarkan LoRA mati agar seluruh bobot linear belajar. LoRA membekukan bobot dasar dan baru cocok bila model dasar yang kompatibel sudah terlatih.",
+                color = NexoraMuted,
+                fontSize = 11.sp
+            )
             if (cfg.useLora) {
                 IntSlider("LoRA rank", cfg.loraRank, 1..32) { AppSettings.updateModel { c -> c.copy(loraRank = it) } }
                 IntSlider("LoRA alpha", cfg.loraAlpha, 4..64) { AppSettings.updateModel { c -> c.copy(loraAlpha = it) } }
