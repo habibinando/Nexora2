@@ -47,6 +47,9 @@ private fun fmtMs(ms: Long): String {
     return "%02d:%02d:%02d".format(seconds / 3600, (seconds % 3600) / 60, seconds % 60)
 }
 
+private fun fmtOperationMs(ms: Long): String =
+    if (ms < 1000L) "$ms ms" else "%.2f dtk".format(Locale.US, ms / 1000.0)
+
 @Composable
 fun TrainScreen() {
     val state by TrainingController.state.collectAsState()
@@ -81,7 +84,7 @@ fun TrainScreen() {
                             Phase.IDLE -> "Belum dimulai"
                             Phase.IMPORTING -> "Menyiapkan dataset"
                             Phase.READY -> "Siap dilatih"
-                            Phase.RUNNING -> "Sedang berjalan"
+                            Phase.RUNNING -> "TRAINING AKTIF"
                             Phase.PAUSED -> "Dijeda"
                             Phase.EARLY_STOPPED -> "Early stop"
                             Phase.FINISHED -> "Selesai"
@@ -106,6 +109,16 @@ fun TrainScreen() {
                 color = NexoraOnSurface, fontSize = 12.sp, fontWeight = FontWeight.Medium
             )
             Text(state.message.ifBlank { "Impor dataset untuk menginisialisasi model dan tokenizer." }, color = NexoraMuted, fontSize = 12.sp)
+            Text(
+                "Operasi aktif: " + state.operation.ifBlank { "menunggu perintah training" },
+                color = NexoraPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 3
+            )
+            if (running || paused) {
+                Text(
+                    "Durasi tahap: ${fmtOperationMs(state.operationElapsedMs)} · optimizer step ${state.step}",
+                    color = NexoraOnSurface, fontSize = 12.sp, fontWeight = FontWeight.Medium
+                )
+            }
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (!running && !paused) {
@@ -181,6 +194,8 @@ fun TrainScreen() {
         SectionTitle("Progres dan detail")
         GlassCard {
             KeyValueRow("Fase", state.phase.name)
+            KeyValueRow("Operasi aktif", state.operation.ifBlank { "—" })
+            KeyValueRow("Durasi tahap", fmtOperationMs(state.operationElapsedMs))
             KeyValueRow("Total optimizer updates", state.step.toString())
             KeyValueRow("Epoch selesai", state.epoch.toString() + " / " + hp.epochs)
             KeyValueRow("Loss", formatLoss(state.loss))
