@@ -1,5 +1,5 @@
 // Nexora native compute core — real, no mock.
-// Optimized CPU: ARM NEON + pthread pool. GPU path in gles_compute.cpp.
+// Optimized CPU: ARM NEON + pthread pool. GPU compute path in vulkan_compute.cpp.
 #include <jni.h>
 #include <cstdint>
 #include <cstring>
