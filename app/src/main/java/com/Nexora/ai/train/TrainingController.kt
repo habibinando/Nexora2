@@ -673,7 +673,7 @@ object TrainingController {
                     // optimizer keeps its own global step for AdamW bias correction.
                     val lr = scheduler.lrAt(scheduleStep)
                     reportOperation("AdamW · memperbarui bobot pada optimizer step ${step + 1}")
-                    optimizer.step(lr)
+                    optimizer.step(lr, onProgress = ::reportOperation)
                     scheduleStep++
                     step = optimizer.step
                     tokensSeen += T.toLong()
