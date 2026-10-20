@@ -87,7 +87,7 @@ jobs:
           set -euo pipefail
           for apk in app/build/outputs/apk/debug/*.apk; do
             test -f "$apk"
-            if ! unzip -Z1 "$apk" | grep -Fq "assets/shaders/matmul.comp.spv"; then
+            if ! unzip -Z1 "$apk" | grep -F "assets/shaders/matmul.comp.spv" > /dev/null; then
               echo "::error::Vulkan SPIR-V shader asset is missing from $apk"
               exit 1
             fi
