@@ -1,5 +1,6 @@
 package com.Nexora.ai.train
 
+import android.app.ActivityManager
 import android.content.Context
 import android.net.Uri
 import com.Nexora.ai.data.CheckpointManager
@@ -88,6 +89,56 @@ object TrainingController {
     @Volatile private var stopped = false
     @Volatile private var resumeCheckpointCompatible = false
 
+    private fun estimateModelParams(cfg: ModelConfig): Long {
+        val d = cfg.dModel.toLong()
+        val f = cfg.ffnDim.toLong()
+        val rank = if (cfg.useLora) cfg.loraRank.toLong() else 0L
+        val embedding = cfg.vocabSize.toLong() * d + cfg.seqLen.toLong() * d
+        val perLayer = 4L * d * d + 2L * d * f + 9L * d + f + rank * (8L * d + 2L * f)
+        return embedding + cfg.numLayers.toLong() * perLayer + 2L * d
+    }
+
+    /**
+     * Approximate peak memory before constructing a model. Deliberately conservative:
+     * parameters, gradients, AdamW moments, logits, per-layer attention/FFN activations,
+     * and the in-memory corpus all compete for the app's large heap.
+     */
+    private fun memoryBudgetMessage(
+        context: Context,
+        cfg: ModelConfig,
+        hp: HyperParams,
+        corpusTokens: Int,
+        training: Boolean
+    ): String? {
+        val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val memoryInfo = ActivityManager.MemoryInfo().also { manager.getMemoryInfo(it) }
+        val mib = 1024L * 1024L
+        val processHeapBytes = manager.largeMemoryClass.toLong() * mib
+        val safeHeap = processHeapBytes * 90L / 100L
+        val safeAvailable = memoryInfo.availMem * 65L / 100L
+        val budget = minOf(safeHeap, safeAvailable)
+
+        val d = cfg.dModel.toLong()
+        val f = cfg.ffnDim.toLong()
+        val v = cfg.vocabSize.toLong()
+        val s = cfg.seqLen.toLong()
+        val b = if (training) hp.batchSize.toLong() else 1L
+        val layers = cfg.numLayers.toLong()
+        val heads = cfg.numHeads.toLong()
+        val params = estimateModelParams(cfg)
+        val parameterBytes = params * (if (training) 16L else 8L)
+        val logitsBytes = b * s * v * (if (training) 8L else 4L)
+        val attentionBytes = b * heads * s * s * layers * (if (training) 8L else 4L)
+        val hiddenBytes = b * s * (d + f) * layers * (if (training) 8L else 4L)
+        val corpusBytes = corpusTokens.toLong() * 4L
+        val scratchBytes = 32L * mib
+        val estimated = parameterBytes + logitsBytes + attentionBytes + hiddenBytes + corpusBytes + scratchBytes
+
+        if (estimated <= budget) return null
+        return "Perkiraan puncak memori model ${estimated / mib} MiB, melebihi anggaran aman ${budget / mib} MiB pada perangkat ini. " +
+            "Kurangi layer, dimensi embedding/FFN, context, batch size, atau ukuran dataset."
+    }
+
     fun init(context: Context) {
         appContext = context.applicationContext
         checkpointManager = CheckpointManager(context.filesDir.resolve("checkpoint"))
@@ -97,6 +148,14 @@ object TrainingController {
         val cfg = checkpointManager.loadConfig()
         if (cfg != null) {
             AppSettings.updateModel { cfg }
+            val memoryWarning = memoryBudgetMessage(context, cfg, AppSettings.hp.value, 0, training = false)
+            if (memoryWarning != null) {
+                _state.value = _state.value.copy(
+                    phase = Phase.ERROR,
+                    message = "Checkpoint tidak dimuat: $memoryWarning Hapus checkpoint atau gunakan arsitektur lebih kecil."
+                )
+                return
+            }
             try {
                 val restoredModel = GPT(cfg)
                 if (checkpointManager.loadTensors(restoredModel)) {
@@ -162,9 +221,13 @@ object TrainingController {
                     ) { p, msg ->
                         _state.value = _state.value.copy(importProgress = p, message = msg)
                     }
+                    val actualCfg = modelCfg.copy(vocabSize = result.tokenizer.vocabSize)
+                    val memoryWarning = memoryBudgetMessage(
+                        appContext, actualCfg, AppSettings.hp.value, result.tokens.size, training = true
+                    )
+                    if (memoryWarning != null) throw IllegalArgumentException(memoryWarning)
                     tokenizer = result.tokenizer
                     corpus = result.tokens
-                    val actualCfg = modelCfg.copy(vocabSize = result.tokenizer.vocabSize)
                     var m = GPT(actualCfg)
                     val checkpointCompatible = canReuseCheckpoint &&
                         savedCfg == actualCfg && checkpointManager.loadTensors(m)
