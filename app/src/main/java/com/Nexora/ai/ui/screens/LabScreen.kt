@@ -135,7 +135,7 @@ fun LabScreen() {
         }
 
         deviceReport?.let { d ->
-            val advice = DeviceModelAdvisor.recommend(d)
+            val advice = DeviceModelAdvisor.recommend(d, gpuInfo)
             SectionTitle("Rekomendasi model & training")
             GlassCard {
                 Text(advice.profileName, color = NexoraPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
