@@ -79,7 +79,7 @@ jobs:
           glslc --version
 
       - name: Build debug APK
-        run: bash ./gradlew --no-daemon --stacktrace :app:assembleDebug
+        run: bash ./gradlew --no-daemon --stacktrace --warning-mode=all :app:assembleDebug
 
       - name: Verify packaged Vulkan SPIR-V shader
         shell: bash
@@ -95,7 +95,7 @@ jobs:
           done
 
       - name: Upload APKs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Nexora2-debug-APK
           path: app/build/outputs/apk/debug/*.apk

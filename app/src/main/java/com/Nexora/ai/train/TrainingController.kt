@@ -179,14 +179,14 @@ object TrainingController {
             label.contains("zero-grad", true) -> 0.03f
             label.contains("forward", true) && (label.contains("proyeksi logits", true) || label.contains("norm akhir", true)) -> 0.40f
             label.contains("forward", true) && validLayerProgress ->
-                0.05f + 0.35f * ((currentLayer!! - 1).toFloat() / layerCount!!)
+                0.05f + 0.35f * ((currentLayer - 1).toFloat() / layerCount)
             label.contains("forward", true) -> 0.05f
             label.contains("cross-entropy", true) -> 0.43f
             label.contains("backward", true) && validLayerProgress -> {
                 // GPT backpropagates in reverse order. The first visited layer is the
                 // highest index; mapping index/total directly makes progress jump near 90%
                 // on the first layer and then freeze because updates are monotonic.
-                val completedLayers = (layerCount!! - currentLayer!!).coerceAtLeast(0)
+                val completedLayers = (layerCount - currentLayer).coerceAtLeast(0)
                 0.45f + 0.43f * (completedLayers + backwardSubstage.coerceIn(0f, 1f)) / layerCount.toFloat()
             }
             label.contains("backward", true) -> 0.45f
@@ -360,7 +360,7 @@ object TrainingController {
                     val savedMeta = if (checkpointCompatible) checkpointManager.loadMeta() else null
                     val sameTrainingDataset = checkpointCompatible &&
                         !savedMeta?.datasetFingerprint.isNullOrBlank() &&
-                        savedMeta?.datasetFingerprint == datasetFingerprint
+                        savedMeta.datasetFingerprint == datasetFingerprint
 
                     // Compatible model weights stay loaded when the dataset changes.
                     // Optimizer moments, epoch count and early-stop history are reused only
