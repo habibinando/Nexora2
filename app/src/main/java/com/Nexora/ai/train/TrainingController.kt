@@ -259,6 +259,16 @@ object TrainingController {
         var tokensSeen = if (resumeCheckpointCompatible) checkpointManager.loadMeta()?.tokensSeen ?: 0L else 0L
         var step = startStep
 
+        fun saveLastValidCheckpoint() {
+            // A bad loss/gradient must not discard valid optimizer updates since the
+            // previous periodic save. Atomic save keeps the earlier checkpoint on failure.
+            try {
+                saveCheckpoint(m, optimizer, tok, step, bestVal, patienceCount, history, tokensSeen)
+            } catch (_: Exception) {
+                // Preserve the original training error; any previous checkpoint remains intact.
+            }
+        }
+
         while (step < hp.maxSteps && !stopped) {
             while (paused && !stopped) delay(200)
             if (stopped) break
@@ -279,6 +289,7 @@ object TrainingController {
             val loss = crossEntropy(logits, target, vocab, gradLogits)
             if (!loss.isFinite()) {
                 _state.value = _state.value.copy(phase = Phase.ERROR, message = "Loss bukan angka valid; training dihentikan.")
+                saveLastValidCheckpoint()
                 return
             }
 
@@ -293,6 +304,7 @@ object TrainingController {
                     phase = Phase.ERROR,
                     message = "Gradien tidak finite; optimizer tidak dijalankan agar bobot tidak rusak."
                 )
+                saveLastValidCheckpoint()
                 return
             }
             if (gNorm > hp.gradClip) {
@@ -308,8 +320,14 @@ object TrainingController {
             val stepMs = (System.currentTimeMillis() - stepStart).coerceAtLeast(1)
             val tps = T * 1000f / stepMs
             val elapsed = System.currentTimeMillis() - startMs
-            val stepsLeft = hp.maxSteps - step
-            val eta = if (tps > 0) (stepsLeft * T * 1000L / tps.toLong()).coerceAtLeast(0L) else 0L
+            val stepsLeft = (hp.maxSteps - step).coerceAtLeast(0)
+            // Keep sub-1 token/s values valid; truncating tps to Long could make
+            // the denominator zero and terminate training during ETA calculation.
+            val eta = if (tps.isFinite() && tps > 0f) {
+                (stepsLeft.toDouble() * T.toDouble() * 1000.0 / tps.toDouble())
+                    .coerceIn(0.0, Long.MAX_VALUE.toDouble())
+                    .toLong()
+            } else 0L
 
             history += loss
             if (history.size > 1000) history.removeAt(0)
