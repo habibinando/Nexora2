@@ -108,6 +108,7 @@ object TrainingController {
     @Volatile private var resumeCheckpointCompatible = false
     @Volatile private var activeDatasetFingerprint: String = ""
     @Volatile private var liveOperationLabel: String = "Menyiapkan training"
+    @Volatile private var liveOperationTimerKey: String = "Menyiapkan training"
     @Volatile private var liveBatchProgress: Float = 0f
     @Volatile private var liveOperationStartedAtMs: Long = 0L
     private var heartbeatJob: Job? = null
@@ -122,7 +123,15 @@ object TrainingController {
             throw TrainingStopRequestedException()
         }
         liveOperationLabel = label
-        liveOperationStartedAtMs = SystemClock.elapsedRealtime()
+        // A changing AdamW percentage is still the same operation: keep its timer
+        // running instead of resetting "Durasi tahap" every 2% update.
+        val timerKey = if (label.startsWith("AdamW · bobot ", ignoreCase = true)) {
+            "AdamW · pembaruan bobot"
+        } else label
+        if (timerKey != liveOperationTimerKey) {
+            liveOperationTimerKey = timerKey
+            liveOperationStartedAtMs = SystemClock.elapsedRealtime()
+        }
         // Operation callbacks arrive at real compute boundaries. Layer callbacks let
         // the UI show partial progress even while one batch has not reached AdamW yet.
         val layerMatch = Regex("layer\\s+(\\d+)\\s*/\\s*(\\d+)", RegexOption.IGNORE_CASE).find(label)
@@ -191,7 +200,7 @@ object TrainingController {
         _state.value = _state.value.copy(
             operation = label,
             batchProgress = liveBatchProgress,
-            operationElapsedMs = 0L
+            operationElapsedMs = (SystemClock.elapsedRealtime() - liveOperationStartedAtMs).coerceAtLeast(0L)
         )
     }
 
