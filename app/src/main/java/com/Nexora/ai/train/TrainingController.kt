@@ -54,6 +54,7 @@ data class TrainState(
     val currentEpoch: Int = 0,
     val batchInEpoch: Int = 0,
     val batchesInEpoch: Int = 0,
+    val totalEpochs: Int = 3,
     val loss: Float = Float.NaN,
     val valLoss: Float = Float.NaN,
     val bestValLoss: Float = Float.MAX_VALUE,
@@ -174,6 +175,7 @@ object TrainingController {
                         step = meta?.step ?: 0,
                         epoch = meta?.epoch ?: 0,
                         currentEpoch = (meta?.epoch ?: 0) + 1,
+                        totalEpochs = AppSettings.hp.value.epochs,
                         bestValLoss = meta?.bestValLoss ?: Float.MAX_VALUE,
                         lossHistory = meta?.lossHistory ?: emptyList(),
                         vocabSize = cfg.vocabSize,
@@ -256,6 +258,7 @@ object TrainingController {
                         currentEpoch = (meta?.epoch ?: 0) + 1,
                         batchInEpoch = 0,
                         batchesInEpoch = 0,
+                        totalEpochs = AppSettings.hp.value.epochs,
                         loss = Float.NaN,
                         valLoss = Float.NaN,
                         bestValLoss = meta?.bestValLoss ?: Float.MAX_VALUE,
@@ -312,6 +315,7 @@ object TrainingController {
             currentEpoch = (_state.value.epoch + 1).coerceAtMost(hp.epochs),
             batchInEpoch = 0,
             batchesInEpoch = 0,
+            totalEpochs = hp.epochs,
             message = "Menyiapkan training per epoch…"
         )
         job = scope.launch {

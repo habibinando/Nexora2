@@ -43,7 +43,10 @@ fun HomeScreen(nav: NavController) {
     val hp by AppSettings.hp.collectAsState()
     val runProgress = (s.currentEpoch - 1).coerceAtLeast(0) +
         if (s.batchesInEpoch > 0) s.batchInEpoch.toFloat() / s.batchesInEpoch else 0f
-    val progress = if (s.phase == Phase.FINISHED) 1f else (runProgress / hp.epochs.coerceAtLeast(1)).coerceIn(0f, 1f)
+    val targetReached = s.epoch >= hp.epochs && s.numTokens > 0
+    val progress = if (targetReached) 1f else (runProgress / hp.epochs.coerceAtLeast(1)).coerceIn(0f, 1f)
+    val displayEpoch = if (s.currentEpoch <= s.epoch && s.epoch < hp.epochs) s.epoch + 1
+        else maxOf(s.currentEpoch, s.epoch)
     val phaseColor = when (s.phase) {
         Phase.RUNNING -> Color(0xFF10B981)
         Phase.PAUSED, Phase.IMPORTING -> NexoraAmber
@@ -72,7 +75,7 @@ fun HomeScreen(nav: NavController) {
                 LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth(), color = phaseColor)
                 KeyValueRow(
                     "Progres training",
-                    "Epoch " + s.currentEpoch.coerceAtLeast(s.epoch) + " / " + hp.epochs +
+                    "Epoch " + displayEpoch + " / " + hp.epochs +
                         if (s.batchesInEpoch > 0) " · batch ${s.batchInEpoch}/${s.batchesInEpoch}" else ""
                 )
                 KeyValueRow("Loss", if (s.loss.isFinite()) "%.5f".format(s.loss) else "Belum ada step")

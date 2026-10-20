@@ -57,12 +57,11 @@ fun TrainScreen() {
     val settingsEnabled = state.phase !in setOf(Phase.RUNNING, Phase.PAUSED, Phase.IMPORTING)
     val runProgress = (state.currentEpoch - 1).coerceAtLeast(0) +
         if (state.batchesInEpoch > 0) state.batchInEpoch.toFloat() / state.batchesInEpoch else 0f
-    val progress = when (state.phase) {
-        Phase.FINISHED -> 1f
-        else -> (runProgress / hp.epochs.coerceAtLeast(1)).coerceIn(0f, 1f)
-    }
-    val progressPercent = (progress * 100).toInt()
     val targetReached = state.epoch >= hp.epochs && state.numTokens > 0
+    val progress = if (targetReached) 1f else (runProgress / hp.epochs.coerceAtLeast(1)).coerceIn(0f, 1f)
+    val progressPercent = (progress * 100).toInt()
+    val displayEpoch = if (state.currentEpoch <= state.epoch && state.epoch < hp.epochs) state.epoch + 1
+        else maxOf(state.currentEpoch, state.epoch)
     val canStart = state.numTokens > 0 && !targetReached &&
         state.phase in setOf(Phase.READY, Phase.IDLE, Phase.FINISHED, Phase.EARLY_STOPPED, Phase.ERROR)
 
@@ -102,7 +101,7 @@ fun TrainScreen() {
                 trackColor = NexoraSurfaceVar
             )
             Text(
-                "Epoch " + (state.currentEpoch.coerceAtLeast(state.epoch)) + " / " + hp.epochs +
+                "Epoch " + displayEpoch + " / " + hp.epochs +
                     if (state.batchesInEpoch > 0) " · batch ${state.batchInEpoch}/${state.batchesInEpoch}" else "",
                 color = NexoraOnSurface, fontSize = 12.sp, fontWeight = FontWeight.Medium
             )
