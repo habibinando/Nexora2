@@ -90,8 +90,26 @@ struct VulkanState {
             vkDestroyDevice(device, nullptr);
         }
         if (instance != VK_NULL_HANDLE) vkDestroyInstance(instance, nullptr);
+
+        // Vulkan handles are scoped to the device/instance they were created from.
+        // Reset every handle after teardown so a retry after partial initialization
+        // cannot accidentally destroy stale objects through a newly created device.
         device = VK_NULL_HANDLE;
         instance = VK_NULL_HANDLE;
+        physical = VK_NULL_HANDLE;
+        queue = VK_NULL_HANDLE;
+        queueFamily = UINT32_MAX;
+        descriptorLayout = VK_NULL_HANDLE;
+        pipelineLayout = VK_NULL_HANDLE;
+        pipeline = VK_NULL_HANDLE;
+        descriptorPool = VK_NULL_HANDLE;
+        descriptorSet = VK_NULL_HANDLE;
+        commandPool = VK_NULL_HANDLE;
+        commandBuffer = VK_NULL_HANDLE;
+        fence = VK_NULL_HANDLE;
+        properties = VkPhysicalDeviceProperties{};
+        memoryProperties = VkPhysicalDeviceMemoryProperties{};
+        error.clear();
         ok = false;
     }
 
