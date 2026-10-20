@@ -33,7 +33,7 @@ android {
     compileSdk = 37
     ndkVersion = "30.0.16248370" // NDK r30 LTS
 
-    sourceSets.getByName("main").assets.srcDir(generatedVulkanAssets)
+    sourceSets.getByName("main").assets.srcDir(generatedVulkanAssets.get().asFile)
 
     defaultConfig {
         applicationId = "com.Nexora.ai"
