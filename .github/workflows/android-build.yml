@@ -77,6 +77,28 @@ jobs:
       - name: Build debug and release APKs
         run: bash ./gradlew --no-daemon --stacktrace :app:assembleDebug :app:assembleRelease
 
+      - name: Verify packaged Vulkan SPIR-V shader
+        shell: bash
+        run: |
+          set -euo pipefail
+          for apk in app/build/outputs/apk/debug/*.apk app/build/outputs/apk/release/*.apk; do
+            test -f "$apk"
+            if ! unzip -Z1 "$apk" | grep -Fxq "assets/shaders/matmul.comp.spv"; then
+              echo "::error::Vulkan shader assets/shaders/matmul.comp.spv missing from $apk"
+              unzip -Z1 "$apk" | grep -E '(^|/)shaders/|\.spv        uses: actions/upload-artifact@v4
+        with:
+          name: Nexora2-APKs
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 14
+ || true
+              exit 1
+            fi
+            echo "Verified SPIR-V shader in $apk"
+          done
+
       - name: Upload APKs
         uses: actions/upload-artifact@v4
         with:
