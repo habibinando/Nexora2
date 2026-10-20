@@ -10,15 +10,17 @@ checkpoint periodik sehingga **bobot terus bertambah** antar sesi.
 - Gradle 9.8.1 (wrapper)
 - AGP 9.4.0
 - NDK r30 LTS (`ndkVersion "30.0.16248370"`)
+- Native CPU kernels: ARM NEON + multithreaded GEMM
+- GPU compute: Vulkan 1.0 + precompiled SPIR-V; no  backend
 - CMake 3.22.1, C++20, NEON + pthread, OpenGL ES 3.1 compute
-- compileSdk / targetSdk 37, minSdk 26, `largeHeap="true"`
+- compileSdk / targetSdk 37, minSdk 31, `largeHeap="true"`
 
 ## Cara build
 1. Buka folder ini di Android Studio (2026.x / Iguana+). Studio akan mengambil
    Gradle 9.8.1 + dependensi secara otomatis.
-2. Pastikan SDK Platform 37 (`android.jar`), NDK r30, dan CMake terpasang. CI memeriksa `android.jar` agar instalasi SDK yang tidak lengkap tidak lolos diam-diam.
+2. Pastikan SDK Platform 37 (`android.jar`), NDK r30, CMake 3.22.1, dan Vulkan shader support terpasang. Shader `app/src/main/shaders/matmul.comp` dikompilasi Gradle menjadi `assets/shaders/matmul.comp.spv`.
 3. `./gradlew :app:assembleDebug` (atau Build > Make Project).
-4. Instal di perangkat Android 8.0+ (minSdk 26). GPU compute opsional.
+4. Instal di perangkat Android 12+ (minSdk 26). GPU compute opsional.
 
 ## Fitur nyata (tidak ada mock)
 | Fitur | Lokasi kode |
@@ -33,7 +35,7 @@ checkpoint periodik sehingga **bobot terus bertambah** antar sesi.
 | Impor dataset streaming JSONL / CSV / TXT, maks 500 MB, vocab 16k dibangun dari dataset | `data/DatasetImporter.kt`, `data/Tokenizer.kt` |
 | Status fase training (forward/backprop/optimizer/evaluasi/checkpoint), error terlihat, loss, val loss, LR, grad norm, token/detik, elapsed, ETA, kurva loss | `ui/screens/TrainScreen.kt` |
 | Chat dengan model hasil latihan (generasi token-per-token, top-k sampling) | `ml/Inference.kt`, `ui/screens/ChatScreen.kt` |
-| Benchmark nyata: CPU GFLOPS (NEON+thread), GPU GFLOPS (GLES compute), throughput training, info perangkat & RAM | `benchmark/BenchmarkRunner.kt`, `cpp/gles_compute.cpp` |
+| Benchmark: CPU GFLOPS (NEON+thread), Vulkan compute GEMM, mini-training throughput, CPU/GPU counters, info perangkat & RAM | `benchmark/BenchmarkRunner.kt`, `cpp/vulkan_compute.cpp`, `main/shaders/matmul.comp` |
 | Maksimalkan CPU: thread pool sejumlah core, NEON intrinsik, `largeHeap=true` | `cpp/native.cpp`, `AndroidManifest.xml` |
 | GPU compute: OpenGL ES 3.1 compute shader (tiled shared memory), fallback CPU | `cpp/gles_compute.cpp` |
 | Foreground service agar training berjalan saat layar mati | `train/TrainingService.kt` |
@@ -43,6 +45,14 @@ checkpoint periodik sehingga **bobot terus bertambah** antar sesi.
 ## Paket & nama
 - applicationId / package: `com.Nexora.ai`
 - Nama aplikasi: `Nexora` (`@string/app_name`)
+
+## Vulkan compute migration
+
+Nexora no longer uses the OpenGL ES/EGL compute path. The native GPU path is Vulkan compute with a GLSL compute shader compiled to SPIR-V during the Android build. The app reads `assets/shaders/matmul.comp.spv` and sends GEMM work through a Vulkan compute pipeline. The CPU NEON/thread-pool implementation remains the fallback when Vulkan is unavailable, the buffer limits are exceeded, or the numerical checks fail.
+
+The initial runtime test compares a 17×19 by 19×13 GPU result with the CPU reference in all four transpose combinations before GPU GEMM is accepted. This confirms shader correctness on edge tiles and transpose layouts, but it does not by itself prove GPU speedup; the benchmark reports end-to-end time including buffers, dispatch, synchronization, and result readback.
+
+Minimum Android SDK is now API 31 (Android 12). Vulkan is an optional device feature, so sideloading remains possible on unsupported devices and the CPU backend can still run.
 
 ## Referensi teknis dan validasi GPU
 
