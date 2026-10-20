@@ -49,31 +49,38 @@ class CheckpointManager(private val dir: File) {
         if (!staging.mkdirs()) throw IllegalStateException("Cannot create checkpoint staging directory")
 
         try {
-            DataOutputStream(BufferedOutputStream(FileOutputStream(File(staging, "config.bin"))).use { o ->
-                val c = model.cfg
-                o.writeInt(c.vocabSize); o.writeInt(c.seqLen); o.writeInt(c.dModel); o.writeInt(c.ffnDim)
-                o.writeInt(c.numHeads); o.writeInt(c.numLayers); o.writeFloat(c.dropout)
-                o.writeBoolean(c.useLora); o.writeInt(c.loraRank); o.writeInt(c.loraAlpha); o.writeFloat(c.layerNormEps)
+            DataOutputStream(BufferedOutputStream(FileOutputStream(File(staging, "config.bin")), 1 shl 20)).use { output ->
+                val config = model.cfg
+                output.writeInt(config.vocabSize); output.writeInt(config.seqLen)
+                output.writeInt(config.dModel); output.writeInt(config.ffnDim)
+                output.writeInt(config.numHeads); output.writeInt(config.numLayers)
+                output.writeFloat(config.dropout)
+                output.writeBoolean(config.useLora); output.writeInt(config.loraRank)
+                output.writeInt(config.loraAlpha); output.writeFloat(config.layerNormEps)
             }
-            DataOutputStream(BufferedOutputStream(FileOutputStream(File(staging, "tokenizer.bin"))).use { tokenizer.save(it) }
-            DataOutputStream(BufferedOutputStream(FileOutputStream(File(staging, "tensors.bin"))).use { o ->
+            DataOutputStream(BufferedOutputStream(FileOutputStream(File(staging, "tokenizer.bin")), 1 shl 20)).use {
+                tokenizer.save(it)
+            }
+            DataOutputStream(BufferedOutputStream(FileOutputStream(File(staging, "tensors.bin")), 1 shl 20)).use { output ->
                 for (tensor in model.allTensors()) {
-                    o.writeInt(tensor.size)
-                    for (value in tensor) o.writeFloat(value)
+                    output.writeInt(tensor.size)
+                    for (value in tensor) output.writeFloat(value)
                 }
             }
-            DataOutputStream(BufferedOutputStream(FileOutputStream(File(staging, "optimizer.bin"))).use { o ->
-                o.writeInt(optimizer.step)
-                for ((m, v) in optimizer.state()) {
-                    o.writeInt(m.size); for (value in m) o.writeFloat(value)
-                    o.writeInt(v.size); for (value in v) o.writeFloat(value)
+            DataOutputStream(BufferedOutputStream(FileOutputStream(File(staging, "optimizer.bin")), 1 shl 20)).use { output ->
+                output.writeInt(optimizer.step)
+                for ((firstMoment, secondMoment) in optimizer.state()) {
+                    output.writeInt(firstMoment.size)
+                    for (value in firstMoment) output.writeFloat(value)
+                    output.writeInt(secondMoment.size)
+                    for (value in secondMoment) output.writeFloat(value)
                 }
             }
-            DataOutputStream(BufferedOutputStream(FileOutputStream(File(staging, "meta.bin"))).use { o ->
-                o.writeInt(meta.step); o.writeInt(meta.epoch); o.writeFloat(meta.bestValLoss)
-                o.writeInt(meta.patienceCount); o.writeLong(meta.tokensSeen)
-                o.writeInt(meta.lossHistory.size)
-                for (loss in meta.lossHistory) o.writeFloat(loss)
+            DataOutputStream(BufferedOutputStream(FileOutputStream(File(staging, "meta.bin")), 1 shl 20)).use { output ->
+                output.writeInt(meta.step); output.writeInt(meta.epoch); output.writeFloat(meta.bestValLoss)
+                output.writeInt(meta.patienceCount); output.writeLong(meta.tokensSeen)
+                output.writeInt(meta.lossHistory.size)
+                for (loss in meta.lossHistory) output.writeFloat(loss)
             }
 
             // Swap the whole directory only after every checkpoint file has closed successfully.
