@@ -25,7 +25,7 @@ checkpoint periodik sehingga **bobot terus bertambah** antar sesi.
 ## Fitur nyata (tidak ada mock)
 | Fitur | Lokasi kode |
 |---|---|
-| Transformer decoder (dModel 128, FFN 512, 32 layer, 8 head, seq 128, vocab 16k) + backward manual | `ml/Modules.kt` |
+| Transformer decoder (default dModel 128, FFN 512, 8 layer, 8 head, seq 64, vocab 16k) + backward manual | `ml/Modules.kt` |
 | LoRA opsional pada Q/K/V/O & MLP; default nonaktif untuk training dari nol karena base weight awalnya acak | `Linear` di `Modules.kt`, `ui/AppSettings.kt` |
 | AdamW + weight decay + gradient clipping | `ml/Optimizer.kt` |
 | Cosine LR schedule dengan warmup | `CosineWarmupScheduler` |
