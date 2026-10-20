@@ -44,7 +44,7 @@ object BenchmarkRunner {
         val cpuMs = NativeOps.nativeBenchMatMul(m, k, n, 20).coerceAtLeast(0.001)
         val cpuGflops = flops / (cpuMs * 1e6)
 
-        onProgress("2/3 · Inisialisasi GPU GLES dan tes GPU 512×512…")
+        onProgress("2/3 · Inisialisasi Vulkan compute dan tes GEMM 512×512…")
         val gpuAvailable = NativeOps.gpuInit()
         val gpuInfo = NativeOps.gpuInfo()
         val gpuMs = if (gpuAvailable) NativeOps.gpuBench(m, k, n, 20) else -1.0
