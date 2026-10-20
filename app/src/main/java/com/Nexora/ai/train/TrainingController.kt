@@ -205,6 +205,12 @@ object TrainingController {
     fun importDataset(uri: Uri, modelCfg: ModelConfig) {
         scope.launch {
             mutex.withLock {
+                if (_state.value.phase == Phase.RUNNING || _state.value.phase == Phase.PAUSED) {
+                    _state.value = _state.value.copy(
+                        message = "Impor dataset ditolak saat training aktif atau dijeda. Hentikan training terlebih dahulu."
+                    )
+                    return@withLock
+                }
                 _state.value = _state.value.copy(phase = Phase.IMPORTING, message = "Mengimpor dataset…", importProgress = 0f)
                 try {
                     val savedCfg = checkpointManager.loadConfig()
@@ -267,6 +273,10 @@ object TrainingController {
     }
 
     fun startTraining(hp: HyperParams) {
+        if (_state.value.phase in setOf(Phase.RUNNING, Phase.PAUSED, Phase.IMPORTING)) {
+            _state.value = _state.value.copy(message = "Training baru tidak dapat dimulai saat training atau impor lain sedang aktif.")
+            return
+        }
         val m = model ?: run { _state.value = _state.value.copy(phase = Phase.ERROR, message = "Belum ada model/dataset. Impor dataset dulu."); return }
         val span = m.cfg.seqLen + 1
         val requiredTokens = span.toLong() * (hp.batchSize + 1L)
@@ -492,6 +502,12 @@ object TrainingController {
     }
 
     fun clearCheckpoint() {
+        if (_state.value.phase in setOf(Phase.RUNNING, Phase.PAUSED, Phase.IMPORTING)) {
+            _state.value = _state.value.copy(
+                message = "Checkpoint tidak dapat dihapus saat training atau impor dataset masih aktif."
+            )
+            return
+        }
         checkpointManager.clear()
         resumeCheckpointCompatible = false
         model = null
