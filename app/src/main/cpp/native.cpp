@@ -182,7 +182,34 @@ Java_com_Nexora_ai_ml_NativeOps_jniMatMul(
     }
 
     GemmArg arg{A, B, C, M, K, N, transA != JNI_FALSE, transB != JNI_FALSE, alpha, beta};
-    long long work = static_cast<long long>(M) * K * N;
+    const long long work = static_cast<long long>(M) * K * N;
+
+    // B^T is stored as N x K, so the old inner loop read B with a K-wide stride.
+    // On CPU fallback this defeats NEON vectorization and causes poor cache locality.
+    // Materialize op(B) as a contiguous K x N matrix for medium/large transposed GEMMs.
+    // GPU operations are handled before this function; this path is for CPU execution
+    // and GPU fallbacks, so favor predictable contiguous memory access here.
+    std::vector<float> contiguousB;
+    const size_t transposedElements = static_cast<size_t>(K) * static_cast<size_t>(N);
+    if (transB != JNI_FALSE && work >= (1LL << 18) && transposedElements <= 8'000'000u) {
+        contiguousB.resize(transposedElements);
+        constexpr int TILE = 32;
+        for (int j0 = 0; j0 < N; j0 += TILE) {
+            const int jEnd = std::min(N, j0 + TILE);
+            for (int k0 = 0; k0 < K; k0 += TILE) {
+                const int kEnd = std::min(K, k0 + TILE);
+                for (int j = j0; j < jEnd; ++j) {
+                    const float* sourceRow = B + static_cast<size_t>(j) * K;
+                    for (int k = k0; k < kEnd; ++k) {
+                        contiguousB[static_cast<size_t>(k) * N + j] = sourceRow[k];
+                    }
+                }
+            }
+        }
+        arg.B = contiguousB.data();
+        arg.transB = false;
+    }
+
     if (work < (1LL << 18) || g_num_threads <= 1) {
         gemm_worker(0, 1, &arg);
     } else {

@@ -42,18 +42,60 @@ object Inference {
     }
 
     private fun sample(logits: FloatArray, offset: Int, vocab: Int, temp: Float, topK: Int, rng: Random): Int {
-        val t = temp.coerceAtLeast(1e-4f)
-        // find top-k indices
-        val idx = IntArray(vocab) { it }
-        // partial sort: take topK
-        val sorted = idx.sortedByDescending { logits[offset + it] }.take(topK).toIntArray()
-        val probs = FloatArray(topK) { exp((logits[offset + sorted[it]] - logits[offset + sorted[0]]) / t) }
-        var sum = 0f; for (p in probs) sum += p
-        var draw = rng.nextFloat() * sum
-        for (i in probs.indices) {
-            draw -= probs[i]
-            if (draw <= 0f) return sorted[i]
+        require(offset >= 0 && vocab > 0 && offset.toLong() + vocab <= logits.size.toLong()) {
+            "Logit range is outside the output buffer."
         }
-        return sorted.last()
+        val k = topK.coerceIn(1, vocab)
+        val t = temp.takeIf { it.isFinite() }?.coerceAtLeast(1e-4f) ?: 0.8f
+
+        // Keep only K candidates in a primitive min-heap instead of boxing and sorting
+        // every vocabulary index for every generated token. Complexity becomes O(V log K),
+        // allocations stay bounded by K, and the token probabilities remain exact top-K.
+        val heap = IntArray(k)
+        var size = 0
+        fun score(token: Int): Float = logits[offset + token]
+
+        for (candidate in 0 until vocab) {
+            if (size < k) {
+                var child = size
+                heap[child] = candidate
+                size++
+                while (child > 0) {
+                    val parent = (child - 1) / 2
+                    if (score(heap[parent]) <= score(heap[child])) break
+                    val tempIndex = heap[parent]
+                    heap[parent] = heap[child]
+                    heap[child] = tempIndex
+                    child = parent
+                }
+            } else if (score(candidate) > score(heap[0])) {
+                heap[0] = candidate
+                var parent = 0
+                while (true) {
+                    val left = parent * 2 + 1
+                    if (left >= size) break
+                    val right = left + 1
+                    var smallest = left
+                    if (right < size && score(heap[right]) < score(heap[left])) smallest = right
+                    if (score(heap[parent]) <= score(heap[smallest])) break
+                    val tempIndex = heap[parent]
+                    heap[parent] = heap[smallest]
+                    heap[smallest] = tempIndex
+                    parent = smallest
+                }
+            }
+        }
+
+        var maxLogit = Float.NEGATIVE_INFINITY
+        for (token in heap) maxLogit = maxOf(maxLogit, score(token))
+        val probs = FloatArray(k) { index -> exp((score(heap[index]) - maxLogit) / t) }
+        var sum = 0f
+        for (probability in probs) sum += probability
+        var draw = rng.nextFloat() * sum
+        for (index in probs.indices) {
+            draw -= probs[index]
+            if (draw <= 0f) return heap[index]
+        }
+        return heap.maxBy { score(it) }
     }
 }

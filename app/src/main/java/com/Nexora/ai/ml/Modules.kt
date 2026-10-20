@@ -85,9 +85,10 @@ class Linear(
         return y
     }
 
-    fun backward(gy: FloatArray, T: Int): FloatArray {
+    fun backward(gy: FloatArray, T: Int, onProgress: ((String) -> Unit)? = null): FloatArray {
         val x = cacheX!!
         if (!frozenBase) {
+            onProgress?.invoke("Linear $inF×$outF · gradien bobot")
             // dW = x^T @ gy  (inF x T) @ (T x outF)
             NativeOps.matmulAccumulate(x, gy, wg, inF, T, outF, transA = true)
         }
@@ -97,6 +98,7 @@ class Linear(
                 for (j in 0 until outF) bg[j] += gy[o + j]
             }
         }
+        onProgress?.invoke("Linear $inF×$outF · gradien input")
         var gx = NativeOps.matmul(gy, w, T, outF, inF, transB = true) // gy @ w^T
         val A = loraA
         if (A != null) {
@@ -287,10 +289,10 @@ class CausalSelfAttention(val cfg: ModelConfig, rng: Random) {
         return proj.forward(y, T)
     }
 
-    fun backward(gy: FloatArray): FloatArray {
+    fun backward(gy: FloatArray, onProgress: ((String) -> Unit)? = null): FloatArray {
         val B = this.B; val S = this.S; val BH = B * H; val T = B * S
         val d = this.d; val hd = this.hd; val H = this.H
-        val gYproj = proj.backward(gy, T) // T x d
+        val gYproj = proj.backward(gy, T) { detail -> onProgress?.invoke("attention output projection · $detail") } // T x d
         // rearrange gYproj to BH x S x hd
         val gOut = FloatArray(BH * S * hd)
         for (b in 0 until B) for (h in 0 until H) for (s in 0 until S) {
@@ -308,7 +310,9 @@ class CausalSelfAttention(val cfg: ModelConfig, rng: Random) {
         val gK = FloatArray(BH * S * hd)
         val mask = dropMask
         val scoreScale = 1f / sqrt(hd.toFloat())
+        onProgress?.invoke("attention gradients · dV and dAttention")
         for (bh in 0 until BH) {
+            if (bh % H == 0) onProgress?.invoke("attention gradients · batch ${bh / H + 1}/$B, heads $H")
             val ao = bh * S * S; val qo = bh * S * hd; val ko = bh * S * hd; val vo = bh * S * hd
             // gV = At^T @ gOut ; gAt = gOut @ V^T
             for (i in 0 until S) for (e in 0 until hd) {
@@ -357,7 +361,8 @@ class CausalSelfAttention(val cfg: ModelConfig, rng: Random) {
             System.arraycopy(gK, src, gQKV, (b * S + s) * 3 * d + 1 * d + h * hd, hd)
             System.arraycopy(gV, src, gQKV, (b * S + s) * 3 * d + 2 * d + h * hd, hd)
         }
-        return qkv.backward(gQKV, T)
+        onProgress?.invoke("attention QKV projection · backpropagation")
+        return qkv.backward(gQKV, T) { detail -> onProgress?.invoke("attention QKV projection · $detail") }
     }
 
     fun zeroGrad() { qkv.zeroGrad(); proj.zeroGrad() }
@@ -376,11 +381,12 @@ class MLP(val cfg: ModelConfig, rng: Random) {
         h = drop.forward(h, training, rng)
         return fc2.forward(h, T)
     }
-    fun backward(gy: FloatArray, T: Int): FloatArray {
-        var gh = fc2.backward(gy, T)
+    fun backward(gy: FloatArray, T: Int, onProgress: ((String) -> Unit)? = null): FloatArray {
+        var gh = fc2.backward(gy, T) { detail -> onProgress?.invoke("MLP FC2 · $detail") }
+        onProgress?.invoke("MLP activation/dropout derivative")
         drop.backward(gh)
         NativeOps.nativeGeluBackwardInplace(gh, cachePreGelu!!, gh.size)
-        return fc1.backward(gh, T)
+        return fc1.backward(gh, T) { detail -> onProgress?.invoke("MLP FC1 · $detail") }
     }
     fun zeroGrad() { fc1.zeroGrad(); fc2.zeroGrad() }
     fun linears() = listOf(fc1, fc2)
@@ -404,11 +410,24 @@ class Block(val cfg: ModelConfig, rng: Random) {
         MathUtil.add(out, m)
         return out
     }
-    fun backward(gy: FloatArray, T: Int): FloatArray {
-        val gm = mlp.backward(gy, T)
+    fun backward(
+        gy: FloatArray,
+        T: Int,
+        layerIndex: Int,
+        layerCount: Int,
+        onProgress: ((String) -> Unit)? = null
+    ): FloatArray {
+        fun report(detail: String) {
+            onProgress?.invoke("Backward · transformer layer $layerIndex/$layerCount · $detail")
+        }
+        report("MLP backpropagation")
+        val gm = mlp.backward(gy, T, ::report)
+        report("layer norm FFN backward")
         val gLn2 = ln2.backward(gm, T)
         val gA = gy.clone(); MathUtil.add(gA, gLn2)
-        val gAtt = attn.backward(gA)
+        report("attention backpropagation")
+        val gAtt = attn.backward(gA, ::report)
+        report("layer norm attention backward")
         val gLn1 = ln1.backward(gAtt, T)
         val gx = gA.clone(); MathUtil.add(gx, gLn1)
         return gx
@@ -484,7 +503,7 @@ class GPT(val cfg: ModelConfig, val rng: Random = Random(1337)) {
         dX = lnF.backward(dX, T)
         for (i in blocks.indices.reversed()) {
             onProgress?.invoke("Backward · transformer layer ${i + 1}/${blocks.size}")
-            dX = blocks[i].backward(dX, T)
+            dX = blocks[i].backward(dX, T, i + 1, blocks.size, onProgress)
         }
         onProgress?.invoke("Backward · embedding dan gradien posisi")
         drop.backward(dX)
