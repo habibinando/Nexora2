@@ -216,8 +216,8 @@ fun TrainScreen() {
                 color = NexoraPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 3
             )
 
-            // Batch describes the dataset chunk; this panel tracks the actual weight-update step.
-            val stepTarget = maxOf(state.targetSteps, state.step, 1)
+            // Batch describes dataset chunks; optimizer steps count complete weight updates.
+            val stepTarget = maxOf(state.targetSteps, state.step)
             val activeStep = state.activeStep.takeIf { it > 0 } ?: (state.step + 1)
             val stepPercent = (state.stepProgress.coerceIn(0f, 1f) * 100f).toInt()
             Text("OPTIMIZER STEP", color = NexoraMuted, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
@@ -225,13 +225,25 @@ fun TrainScreen() {
                 Column(Modifier.weight(1f)) {
                     Text(
                         when {
-                            (running || paused) && activeStep > state.step -> "Step $activeStep / $stepTarget · sedang diproses"
-                            state.step > 0 -> "Step ${state.step} / $stepTarget · update bobot selesai"
-                            else -> "Step 1 / $stepTarget · belum ada update selesai"
+                            (running || paused) && activeStep > state.step ->
+                                "Step $activeStep / ${maxOf(stepTarget, activeStep)} · sedang diproses"
+                            state.targetSteps > 0 && state.step > 0 ->
+                                "Step ${state.step} / $stepTarget · update bobot selesai"
+                            state.targetSteps > 0 ->
+                                "Step 1 / $stepTarget · belum ada update selesai"
+                            state.step > 0 -> "Step ${state.step} · checkpoint tersimpan"
+                            else -> "Target step dihitung saat training dimulai"
                         },
                         color = NexoraOnSurface, fontSize = 13.sp, fontWeight = FontWeight.Bold
                     )
-                    Text("Update bobot lengkap: ${state.step} dari $stepTarget", color = NexoraMuted, fontSize = 11.sp)
+                    Text(
+                        when {
+                            state.targetSteps > 0 -> "Update bobot lengkap: ${state.step} dari $stepTarget"
+                            state.step > 0 -> "Update bobot tersimpan di checkpoint: ${state.step}"
+                            else -> "Belum ada optimizer update yang selesai."
+                        },
+                        color = NexoraMuted, fontSize = 11.sp
+                    )
                 }
                 Text(
                     if (running || paused) "$stepPercent%" else if (state.step > 0) "100%" else "0%",
@@ -245,7 +257,7 @@ fun TrainScreen() {
                 trackColor = NexoraSurfaceVar
             )
             Text(
-                "Step = satu update bobot setelah backpropagation + AdamW. Batch tetap ditampilkan terpisah di header epoch.",
+                "Satu step = satu update bobot melalui backpropagation + AdamW. Target total baru diketahui setelah rencana training dibuat.",
                 color = NexoraMuted, fontSize = 11.sp
             )
             if (running || paused) {

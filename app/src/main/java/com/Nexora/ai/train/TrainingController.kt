@@ -385,6 +385,9 @@ object TrainingController {
                     _state.value = _state.value.copy(
                         phase = Phase.READY,
                         step = meta?.step ?: 0,
+                        activeStep = meta?.step ?: 0,
+                        targetSteps = 0,
+                        stepProgress = 0f,
                         epoch = meta?.epoch ?: 0,
                         currentEpoch = (meta?.epoch ?: 0) + 1,
                         batchInEpoch = 0,
