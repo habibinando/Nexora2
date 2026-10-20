@@ -131,7 +131,7 @@ object DatasetImporter {
             name.endsWith(".tsv") -> "tsv"
             else -> "txt"
         }
-        val delimiter = if (format == "tsv") '\\t' else ','
+        val delimiter = if (format == "tsv") '\t' else ','
 
         val existingTokenizer = tokenizerOverride?.takeIf { it.vocabSize == vocabSize }
         val frequencies = if (existingTokenizer == null) {
