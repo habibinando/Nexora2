@@ -21,18 +21,33 @@ class Tokenizer private constructor(
 
     fun encode(text: String, addBos: Boolean = true, addEos: Boolean = false): IntArray {
         val out = mutableListOf<Int>()
-        if (addBos) out += bosId
-        val pieces = splitToPieces(text)
-        for (p in pieces) {
-            val id = wordToId[p]
+        encodeTo(text, addBos, addEos) { out.add(it); true }
+        return out.toIntArray()
+    }
+
+    /**
+     * Encode directly into a consumer. Returning false stops immediately; this avoids a
+     * boxed MutableList<Int> per row when streaming large training datasets.
+     */
+    fun encodeTo(
+        text: String,
+        addBos: Boolean = true,
+        addEos: Boolean = false,
+        emit: (Int) -> Boolean
+    ): Boolean {
+        if (addBos && !emit(bosId)) return false
+        for (match in PIECE_REGEX.findAll(text)) {
+            val piece = match.value
+            val id = wordToId[piece]
             if (id != null) {
-                out += id
+                if (!emit(id)) return false
             } else {
-                for (b in p.toByteArray(Charsets.UTF_8)) out += byteOffset + (b.toInt() and 0xFF)
+                for (byte in piece.toByteArray(Charsets.UTF_8)) {
+                    if (!emit(byteOffset + (byte.toInt() and 0xFF))) return false
+                }
             }
         }
-        if (addEos) out += eosId
-        return out.toIntArray()
+        return !addEos || emit(eosId)
     }
 
     fun decode(ids: IntArray): String {
