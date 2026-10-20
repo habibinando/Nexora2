@@ -44,6 +44,14 @@ checkpoint periodik sehingga **bobot terus bertambah** antar sesi.
 - applicationId / package: `com.Nexora.ai`
 - Nama aplikasi: `Nexora` (`@string/app_name`)
 
+## Referensi teknis dan validasi GPU
+
+- [Android NDK r30 changelog](https://github.com/android/ndk/wiki/Changelog-r30): r30 memperbarui Clang dan sysroot hingga API 37. Toolchain ini membantu membangun kode native; pemasangan NDK sendiri tidak membuat training otomatis berjalan di GPU.
+- [Android NDK shader compilers](https://developer.android.com/ndk/guides/graphics/shader-compilers): halaman ini membahas shader **Vulkan** yang menggunakan SPIR-V. Nexora saat ini memakai **OpenGL ES 3.1 compute**, yang mengirim sumber GLSL ke driver saat runtime; karena itu Shaderc/SPIR-V tidak ditambahkan tanpa migrasi backend Vulkan yang sesungguhnya.
+- [PyTorch Android model preparation recipe](https://pytorch-cn.com/tutorials/recipes/model_preparation_android.html): contoh tersebut menyiapkan model TorchScript/quantized untuk inferensi. Itu bukan pengganti loop backpropagation/optimizer Nexora, jadi tidak dianggap sebagai akselerasi training.
+- Sebelum GEMM GPU dipakai, Nexora membandingkan hasilnya dengan GEMM CPU untuk matriks 17×19 dikali 19×13. Ukuran non-kelipatan 16 membantu menguji batas tile shader. Bila inisialisasi atau hasil tes gagal, operasi GEMM dialihkan ke CPU.
+- Counter CPU/GPU di layar training direset pada awal setiap sesi training agar hasil benchmark terdahulu tidak tercampur ke angka sesi baru. Build CI membuktikan APK dapat dikompilasi; verifikasi numerik tetap perlu dijalankan pada perangkat Android target.
+
 ## Catatan
 - LiteRT adalah runtime inferensi/delegates, bukan pengganti langsung untuk melatih transformer custom FloatArray ini. Integrasi membutuhkan jalur ekspor model yang kompatibel, sehingga dependency LiteRT tidak ditambahkan sekadar sebagai label GPU.
 - Workflow CI menjalankan Gradle dengan JDK 25 tetapi menghasilkan bytecode Java 21. Instalasi Android API 37 diverifikasi dengan pemeriksaan `android.jar`.
