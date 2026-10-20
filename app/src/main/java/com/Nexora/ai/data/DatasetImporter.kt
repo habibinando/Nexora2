@@ -243,7 +243,7 @@ object DatasetImporter {
         input.use { stream ->
             BufferedReader(InputStreamReader(stream, Charsets.UTF_8), 1 shl 20).use { reader ->
                 while (true) {
-                    val line = if (format == "csv" || format == "tsv") readCsvRecord(reader) else reader.readLine() ?: break
+                    val line = (if (format == "csv" || format == "tsv") readCsvRecord(reader) else reader.readLine()) ?: break
                     lineNumber++
                     bytesRead += line.toByteArray(Charsets.UTF_8).size.toLong() + 1L
                     if (bytesRead > MAX_BYTES) {
