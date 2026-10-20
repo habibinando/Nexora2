@@ -11,6 +11,7 @@ class NexoraApp : Application() {
         // Restore saved training settings before loading an existing checkpoint.
         AppSettings.initialize(this)
         NativeOps.nativeSetThreads(NativeOps.nativeCpuCores())
+        NativeOps.initialize(this)
         TrainingController.init(this)
     }
 }
