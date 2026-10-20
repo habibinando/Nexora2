@@ -7,7 +7,7 @@ plugins {
 }
 
 val generatedVulkanAssets = layout.buildDirectory.dir("generated/vulkanAssets")
-val compileVulkanShader by tasks.registering(Exec::class) {
+val compileVulkanShader = tasks.register<Exec>("compileVulkanShader") {
     val shaderSource = file("src/main/shaders/matmul.comp")
     val shaderOutput = generatedVulkanAssets.get().file("shaders/matmul.comp.spv").asFile
     inputs.file(shaderSource)
