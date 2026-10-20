@@ -8,16 +8,18 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.util.TreeMap
+import java.util.LinkedHashSet
 
 /**
- * Streams a dataset (JSONL / CSV / TXT, up to 500 MB) from a SAF Uri,
- * builds tokenizer vocab frequencies, and writes token ids to a corpus file.
- * Real streaming parser — never loads the whole file into memory.
+ * Two-pass streaming dataset importer.
+ * Pass one counts candidate vocabulary across the full file. Pass two reopens it and writes
+ * token IDs into primitive storage. This avoids skipping data after 20,000 rows and avoids
+ * a boxed ArrayList<Int>, which can consume many times more memory than the token IDs.
  */
 object DatasetImporter {
-
     const val MAX_BYTES = 500L * 1024 * 1024
-    const val MAX_TOKENS = 64_000_000 // 256 MB of IntArray, safe with largeHeap=true
+    const val MAX_TOKENS = 64_000_000
 
     data class Result(
         val tokenizer: Tokenizer,
@@ -27,7 +29,80 @@ object DatasetImporter {
         val truncated: Boolean
     )
 
+    private data class ScanSummary(
+        val bytesRead: Long,
+        val textRows: Long,
+        val completedNormally: Boolean
+    )
+
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+
+    /** Bounded Space-Saving counters keep frequent candidate pieces with bounded memory. */
+    private class BoundedFrequencies(private val capacity: Int) {
+        private data class Counter(var count: Int)
+        private val counts = HashMap<String, Counter>(capacity)
+        private val byCount = TreeMap<Int, LinkedHashSet<String>>()
+
+        private fun addToBucket(piece: String, count: Int) {
+            byCount.getOrPut(count) { LinkedHashSet() }.add(piece)
+        }
+
+        private fun removeFromBucket(piece: String, count: Int) {
+            val bucket = byCount[count] ?: return
+            bucket.remove(piece)
+            if (bucket.isEmpty()) byCount.remove(count)
+        }
+
+        fun add(piece: String) {
+            val current = counts[piece]
+            if (current != null) {
+                removeFromBucket(piece, current.count)
+                if (current.count < Int.MAX_VALUE) current.count++
+                addToBucket(piece, current.count)
+                return
+            }
+
+            if (counts.size < capacity) {
+                counts[piece] = Counter(1)
+                addToBucket(piece, 1)
+                return
+            }
+
+            val minimum = byCount.firstEntry() ?: return
+            val bucket = minimum.value
+            val victim = bucket.first()
+            bucket.remove(victim)
+            if (bucket.isEmpty()) byCount.remove(minimum.key)
+            counts.remove(victim)
+
+            val estimated = (minimum.key.toLong() + 1L)
+                .coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            counts[piece] = Counter(estimated)
+            addToBucket(piece, estimated)
+        }
+
+        fun toFrequencyMap(): Map<String, Int> = counts.mapValues { it.value.count }
+    }
+
+    /** Growable primitive integer storage. */
+    private class IntArrayBuilder(private val maximum: Int) {
+        private var data = IntArray(minOf(1 shl 16, maximum))
+        var size: Int = 0
+            private set
+
+        fun add(value: Int): Boolean {
+            if (size >= maximum) return false
+            if (size == data.size) {
+                val next = minOf(maximum, maxOf(size + 1, data.size * 3 / 2))
+                if (next <= size) return false
+                data = data.copyOf(next)
+            }
+            data[size++] = value
+            return true
+        }
+
+        fun toIntArray(): IntArray = if (size == data.size) data else data.copyOf(size)
+    }
 
     fun import(
         context: Context,
@@ -36,140 +111,233 @@ object DatasetImporter {
         tokenizerOverride: Tokenizer? = null,
         onProgress: (Float, String) -> Unit
     ): Result {
-        val pfd = context.contentResolver.openAssetFileDescriptor(uri, "r")
-            ?: throw IllegalStateException("Cannot open file")
-        val size = pfd.length.coerceAtLeast(0)
-        if (size > MAX_BYTES) throw IllegalArgumentException("File exceeds 500 MB limit")
-        val stream = context.contentResolver.openInputStream(uri)
-            ?: throw IllegalStateException("Cannot open input stream")
-        val reader = BufferedReader(InputStreamReader(stream, Charsets.UTF_8), 1 shl 20)
+        require(vocabSize > Tokenizer.SPECIAL + Tokenizer.BYTES) {
+            "Vocabulary harus lebih besar dari ${Tokenizer.SPECIAL + Tokenizer.BYTES} token."
+        }
 
-        val fname = uri.lastPathSegment?.lowercase().orEmpty()
+        val reportedSize = try {
+            context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: -1L
+        } catch (_: Exception) {
+            -1L
+        }
+        if (reportedSize > MAX_BYTES) {
+            throw IllegalArgumentException("Dataset melebihi batas 500 MiB.")
+        }
+
+        val name = uri.lastPathSegment?.substringAfterLast(':')?.lowercase().orEmpty()
         val format = when {
-            fname.endsWith(".jsonl") || fname.endsWith(".json") -> "jsonl"
-            fname.endsWith(".csv") || fname.endsWith(".tsv") -> "csv"
+            name.endsWith(".jsonl") || name.endsWith(".json") -> "jsonl"
+            name.endsWith(".csv") -> "csv"
+            name.endsWith(".tsv") -> "tsv"
             else -> "txt"
         }
+        val delimiter = if (format == "tsv") '\\t' else ','
 
-        val freq = HashMap<String, Int>(1024 * 1024)
-        val examples = mutableListOf<String>()
-        var numExamples = 0L
+        val existingTokenizer = tokenizerOverride?.takeIf { it.vocabSize == vocabSize }
+        val frequencies = if (existingTokenizer == null) {
+            val candidateLimit = (vocabSize.toLong() * 8L).coerceIn(65_536L, 512_000L).toInt()
+            BoundedFrequencies(candidateLimit)
+        } else null
+
+        onProgress(0.01f, "Pass 1/2 — membaca seluruh dataset dan menghitung kandidat kosakata…")
+        val first = scanTextRows(
+            context = context,
+            uri = uri,
+            format = format,
+            delimiter = delimiter,
+            expectedBytes = reportedSize,
+            progressStart = 0.01f,
+            progressEnd = 0.45f,
+            phaseName = "Pass 1/2",
+            onProgress = onProgress
+        ) { text ->
+            if (frequencies != null) {
+                Tokenizer.forEachPiece(text) { piece -> frequencies.add(piece) }
+            }
+            true
+        }
+
+        if (first.textRows == 0L) {
+            throw IllegalArgumentException("Dataset tidak berisi teks yang dapat dibaca. Periksa format dan kolom text/content.")
+        }
+
+        onProgress(0.48f, "Membuat tokenizer dari ${first.textRows} contoh teks…")
+        val tokenizer = existingTokenizer ?: Tokenizer.build(frequencies!!.toFrequencyMap(), vocabSize)
+        val corpusBuilder = IntArrayBuilder(MAX_TOKENS)
+        var tokenizedRows = 0L
+
+        onProgress(0.50f, "Pass 2/2 — tokenisasi seluruh dataset…")
+        val second = scanTextRows(
+            context = context,
+            uri = uri,
+            format = format,
+            delimiter = delimiter,
+            expectedBytes = reportedSize,
+            progressStart = 0.50f,
+            progressEnd = 0.98f,
+            phaseName = "Pass 2/2",
+            onProgress = onProgress
+        ) { text ->
+            val completeRow = tokenizer.encodeTo(text, addBos = true, addEos = true) { token ->
+                corpusBuilder.add(token)
+            }
+            if (completeRow) tokenizedRows++
+            completeRow
+        }
+
+        val tokens = corpusBuilder.toIntArray()
+        if (tokens.isEmpty()) throw IllegalArgumentException("Tidak ada token yang berhasil dibuat dari dataset.")
+        val truncated = !second.completedNormally
+        val finalMessage = if (truncated) {
+            "Batas $MAX_TOKENS token tercapai; dataset terpotong. Token tersimpan: ${tokens.size}."
+        } else {
+            "Selesai: ${tokens.size} token dari $tokenizedRows contoh teks."
+        }
+        onProgress(1f, finalMessage)
+
+        return Result(
+            tokenizer = tokenizer,
+            tokens = tokens,
+            numExamples = tokenizedRows,
+            bytesRead = first.bytesRead,
+            truncated = truncated
+        )
+    }
+
+    private fun scanTextRows(
+        context: Context,
+        uri: Uri,
+        format: String,
+        delimiter: Char,
+        expectedBytes: Long,
+        progressStart: Float,
+        progressEnd: Float,
+        phaseName: String,
+        onProgress: (Float, String) -> Unit,
+        onText: (String) -> Boolean
+    ): ScanSummary {
         var bytesRead = 0L
-        var truncated = false
-        val charBuf = CharArray(8192)
-
-        // First pass: stream lines, extract text, count piece frequencies.
+        var textRows = 0L
+        var lineNumber = 0L
+        var completedNormally = true
         var header: List<String>? = null
-        var textCol = 0
-        var line: String?
-        while (true) {
-            line = reader.readLine() ?: break
-            bytesRead += line.length + 1
-            if (bytesRead > MAX_BYTES) { truncated = true; break }
-            if (numExamples % 5000 == 0L) onProgress(bytesRead.toFloat() / size.coerceAtLeast(1), "Scanning… ${(bytesRead / 1048576)} MB")
-            val text = when (format) {
-                "jsonl" -> extractJsonText(line) ?: continue
-                "csv" -> {
-                    val cols = parseCsvLine(line)
-                    if (header == null) { header = cols; textCol = findTextCol(cols); continue }
-                    cols.getOrNull(textCol) ?: continue
+        var textColumn = 0
+
+        val input = context.contentResolver.openInputStream(uri)
+            ?: throw IllegalStateException("Tidak dapat membuka ulang dataset. Pilih file yang dapat dibaca dua kali.")
+
+        input.use { stream ->
+            BufferedReader(InputStreamReader(stream, Charsets.UTF_8), 1 shl 20).use { reader ->
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    lineNumber++
+                    bytesRead += line.toByteArray(Charsets.UTF_8).size.toLong() + 1L
+                    if (bytesRead > MAX_BYTES) {
+                        throw IllegalArgumentException("Dataset melebihi batas 500 MiB saat dibaca.")
+                    }
+
+                    val text: String? = when (format) {
+                        "jsonl" -> extractJsonText(line)
+                        "csv", "tsv" -> {
+                            val columns = parseCsvLine(line, delimiter)
+                            if (header == null) {
+                                header = columns
+                                textColumn = findTextCol(columns)
+                                null
+                            } else {
+                                columns.getOrNull(textColumn)
+                            }
+                        }
+                        else -> line
+                    }
+
+                    if (!text.isNullOrBlank()) {
+                        textRows++
+                        if (!onText(text)) {
+                            completedNormally = false
+                            break
+                        }
+                    }
+
+                    if (lineNumber % 1000L == 0L) {
+                        val ratio = if (expectedBytes > 0L) {
+                            (bytesRead.toFloat() / expectedBytes.toFloat()).coerceIn(0f, 1f)
+                        } else {
+                            (textRows.toFloat() / 100_000f).coerceIn(0f, 0.9f)
+                        }
+                        val progress = progressStart + (progressEnd - progressStart) * ratio
+                        onProgress(progress.coerceIn(0f, 0.99f), "$phaseName — $textRows baris teks, $bytesRead byte dibaca")
+                    }
                 }
-                else -> line
-            }
-            if (text.isBlank()) continue
-            numExamples++
-            for (p in Tokenizer.splitToPieces(text)) freq.merge(p, 1, Int::plus)
-            examples += text
-            // Keep examples bounded; flush to token list periodically
-            if (examples.size >= 20000) break // we'll tokenize in second pass below
-        }
-        reader.close()
-
-        onProgress(0.95f, "Building vocab (${freq.size} unique pieces)…")
-        val tokenizer = tokenizerOverride?.takeIf { it.vocabSize == vocabSize }
-            ?: Tokenizer.build(freq, vocabSize)
-
-        // Second pass: tokenize examples into a flat IntArray corpus.
-        val tokensList = ArrayList<Int>(1_000_000)
-        fun tokenizeText(text: String) {
-            val ids = tokenizer.encode(text, addBos = true, addEos = true)
-            for (id in ids) {
-                if (tokensList.size >= MAX_TOKENS) { truncated = true; return }
-                tokensList += id
             }
         }
-        for (t in examples) tokenizeText(t)
-        // If first pass broke early due to example buffer, continue streaming remaining
-        if (!truncated && examples.size >= 20000) {
-            val stream2 = context.contentResolver.openInputStream(uri)!!
-            val reader2 = BufferedReader(InputStreamReader(stream2, Charsets.UTF_8), 1 shl 20)
-            var skipped = examples.size.toLong()
-            var l: String?
-            var hdr = header
-            while (true) {
-                l = reader2.readLine() ?: break
-                if (skipped > 0) { skipped--; continue }
-                val text = when (format) {
-                    "jsonl" -> extractJsonText(l) ?: continue
-                    "csv" -> { val cols = parseCsvLine(l); if (hdr == null) { hdr = cols; continue }; cols.getOrNull(textCol) ?: continue }
-                    else -> l
-                }
-                if (text.isBlank()) continue
-                numExamples++
-                tokenizeText(text)
-                if (tokensList.size >= MAX_TOKENS) { truncated = true; break }
-            }
-            reader2.close()
-        }
-
-        onProgress(1f, "Done: ${tokensList.size} tokens")
-        return Result(tokenizer, tokensList.toIntArray(), numExamples, bytesRead, truncated)
+        return ScanSummary(bytesRead, textRows, completedNormally)
     }
 
     private fun extractJsonText(line: String): String? {
-        val el = try { json.parseToJsonElement(line) } catch (_: Exception) { return null }
-        return when (el) {
+        val element = try {
+            json.parseToJsonElement(line)
+        } catch (_: Exception) {
+            return null
+        }
+        return when (element) {
             is JsonObject -> {
-                el["text"]?.jsonPrimitive?.content
-                    ?: el["content"]?.jsonPrimitive?.content
-                    ?: el["message"]?.jsonPrimitive?.content
-                    ?: el.values.firstOrNull { it is kotlinx.serialization.json.JsonPrimitive && it.isString }?.jsonPrimitive?.content
+                element["text"]?.jsonPrimitive?.content
+                    ?: element["content"]?.jsonPrimitive?.content
+                    ?: element["message"]?.jsonPrimitive?.content
+                    ?: element.values.firstOrNull {
+                        it is kotlinx.serialization.json.JsonPrimitive && it.isString
+                    }?.jsonPrimitive?.content
             }
-            is JsonArray -> el.firstOrNull { it is kotlinx.serialization.json.JsonPrimitive && it.isString }?.jsonPrimitive?.content
-            else -> if (el is kotlinx.serialization.json.JsonPrimitive && el.isString) el.content else null
+            is JsonArray -> element.firstOrNull {
+                it is kotlinx.serialization.json.JsonPrimitive && it.isString
+            }?.jsonPrimitive?.content
+            else -> if (
+                element is kotlinx.serialization.json.JsonPrimitive && element.isString
+            ) element.content else null
         }
     }
 
-    private fun findTextCol(cols: List<String>): Int {
-        cols.forEachIndexed { i, c ->
-            val lc = c.lowercase()
-            if (lc in setOf("text", "content", "message", "prompt", "input", "instruction")) return i
+    private fun findTextCol(columns: List<String>): Int {
+        columns.forEachIndexed { index, column ->
+            if (column.trim().lowercase() in setOf("text", "content", "message", "prompt", "input", "instruction")) {
+                return index
+            }
         }
-        return cols.size - 1
+        return (columns.size - 1).coerceAtLeast(0)
     }
 
-    /** Minimal RFC-4180-ish CSV line parser (handles quoted fields). */
-    fun parseCsvLine(line: String): List<String> {
+    /** CSV/TSV line parser with quoted fields and escaped double quotes. */
+    fun parseCsvLine(line: String, delimiter: Char = ','): List<String> {
         val out = mutableListOf<String>()
-        val cur = StringBuilder()
+        val current = StringBuilder()
         var inQuotes = false
-        var i = 0
-        while (i < line.length) {
-            val c = line[i]
+        var index = 0
+        while (index < line.length) {
+            val char = line[index]
             when {
                 inQuotes -> {
-                    if (c == '"') {
-                        if (i + 1 < line.length && line[i + 1] == '"') { cur.append('"'); i++ }
-                        else inQuotes = false
-                    } else cur.append(c)
+                    if (char == '"') {
+                        if (index + 1 < line.length && line[index + 1] == '"') {
+                            current.append('"')
+                            index++
+                        } else {
+                            inQuotes = false
+                        }
+                    } else {
+                        current.append(char)
+                    }
                 }
-                c == '"' -> inQuotes = true
-                c == ',' -> { out += cur.toString(); cur.clear() }
-                else -> cur.append(c)
+                char == '"' -> inQuotes = true
+                char == delimiter -> {
+                    out += current.toString()
+                    current.clear()
+                }
+                else -> current.append(char)
             }
-            i++
+            index++
         }
-        out += cur.toString()
+        out += current.toString()
         return out
     }
 }
