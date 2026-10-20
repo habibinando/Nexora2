@@ -38,6 +38,7 @@ import com.Nexora.ai.benchmark.BenchmarkResult
 import com.Nexora.ai.benchmark.BenchmarkRunner
 import com.Nexora.ai.ml.NativeOps
 import com.Nexora.ai.system.DeviceDiagnostics
+import com.Nexora.ai.system.DeviceModelAdvisor
 import com.Nexora.ai.train.Phase
 import com.Nexora.ai.train.TrainingController
 import com.Nexora.ai.ui.AppSettings
@@ -128,8 +129,58 @@ fun LabScreen() {
                 KeyValueRow("Kondisi low-memory OS", if (d.lowMemory) "Ya" else "Tidak")
                 KeyValueRow("Batas Java heap aplikasi", DeviceDiagnostics.formatBytes(d.appHeapMaxBytes))
                 KeyValueRow("Java heap terpakai", DeviceDiagnostics.formatBytes(d.appHeapUsedBytes))
-                KeyValueRow("Memory class / large heap", "\${d.memoryClassMb} / \${d.largeMemoryClassMb} MiB")
+                KeyValueRow("Memory class / large heap", "${d.memoryClassMb} / ${d.largeMemoryClassMb} MiB")
                 KeyValueRow("Status termal Android", d.thermalStatus)
+            }
+        }
+
+        deviceReport?.let { d ->
+            val advice = DeviceModelAdvisor.recommend(d)
+            SectionTitle("Rekomendasi model & training")
+            GlassCard {
+                Text(advice.profileName, color = NexoraPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Text(advice.reason, color = NexoraMuted, fontSize = 12.sp)
+                KeyValueRow(
+                    "Model",
+                    "vocab ${advice.model.vocabSize} · dModel ${advice.model.dModel} · FFN ${advice.model.ffnDim}"
+                )
+                KeyValueRow(
+                    "Arsitektur",
+                    "${advice.model.numLayers} layer · ${advice.model.numHeads} heads · context ${advice.model.seqLen}"
+                )
+                KeyValueRow("Parameter perkiraan", "%,d".format(BenchmarkRunner.estimateParameterCount(advice.model)))
+                KeyValueRow("Batch size", advice.training.batchSize.toString())
+                KeyValueRow("Epoch awal", advice.training.epochs.toString())
+                KeyValueRow("Learning rate", "%.2e".format(advice.training.learningRate))
+                KeyValueRow("Thread CPU", advice.training.numThreads.toString())
+                KeyValueRow("Validasi / simpan", "${advice.training.evalEvery} / ${advice.training.saveEvery} step")
+                advice.notes.forEach { note ->
+                    Text("• $note", color = NexoraMuted, fontSize = 11.sp)
+                }
+                Text(
+                    "Terapkan hanya mengubah setelan. Arsitektur baru digunakan saat impor dataset berikutnya; checkpoint aktif tidak diubah otomatis.",
+                    color = NexoraOnSurface, fontSize = 11.sp
+                )
+                Button(
+                    onClick = {
+                        AppSettings.updateModel { advice.model }
+                        AppSettings.updateHp { advice.training }
+                    },
+                    enabled = resetAllowed,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = NexoraPrimary,
+                        contentColor = androidx.compose.ui.graphics.Color.Black
+                    )
+                ) {
+                    Text("Terapkan rekomendasi perangkat", fontWeight = FontWeight.Bold)
+                }
+                if (!resetAllowed) {
+                    Text(
+                        "Hentikan training/impor/benchmark dahulu untuk mengubah rekomendasi.",
+                        color = NexoraMuted, fontSize = 11.sp
+                    )
+                }
             }
         }
 
