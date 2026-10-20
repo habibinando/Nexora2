@@ -181,7 +181,8 @@ fun TrainScreen() {
         SectionTitle("Progres dan detail")
         GlassCard {
             KeyValueRow("Fase", state.phase.name)
-            KeyValueRow("Step selesai / target", state.step.toString() + " / " + hp.maxSteps)
+            KeyValueRow("Total optimizer updates", state.step.toString())
+            KeyValueRow("Epoch selesai", state.epoch.toString() + " / " + hp.epochs)
             KeyValueRow("Loss", formatLoss(state.loss))
             KeyValueRow("Validation loss", formatLoss(state.valLoss))
             KeyValueRow("Best validation loss", formatLoss(state.bestValLoss))

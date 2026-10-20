@@ -411,6 +411,7 @@ object TrainingController {
         }
 
         var step = optimizer.step
+        var scheduleStep = 0
         val remainingEpochs = hp.epochs - completedEpochs
         val plannedStepsLong = step.toLong() + remainingEpochs.toLong() * stepsPerEpoch.toLong()
         val plannedTotalSteps = plannedStepsLong.coerceAtMost(Int.MAX_VALUE.toLong()).toInt().coerceAtLeast(step + 1)
@@ -518,8 +519,11 @@ object TrainingController {
                     _state.value = _state.value.copy(
                         message = "Epoch \${epochIndex + 1}/\${hp.epochs} · batch \${batchIndex + 1}/$stepsPerEpoch — AdamW memperbarui bobot…"
                     )
-                    val lr = scheduler.lrAt(step)
+                    // Scheduler progress is local to this requested training run; the
+                    // optimizer keeps its own global step for AdamW bias correction.
+                    val lr = scheduler.lrAt(scheduleStep)
                     optimizer.step(lr)
+                    scheduleStep++
                     step = optimizer.step
                     tokensSeen += T.toLong()
 
