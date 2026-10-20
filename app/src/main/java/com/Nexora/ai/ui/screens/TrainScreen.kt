@@ -119,7 +119,11 @@ fun TrainScreen() {
             KeyValueRow("Step selesai / target", "${state.step} / ${hp.maxSteps}")
             KeyValueRow("Loss", if (state.loss.isFinite()) "%.5f".format(state.loss) else "Belum ada step")
             KeyValueRow("Validation loss", if (state.valLoss.isFinite()) "%.5f".format(state.valLoss) else "Belum dievaluasi")
-            KeyValueRow("Best validation loss", "%.5f".format(if (state.bestValLoss == Float.MAX_VALUE) 0f else state.bestValLoss))
+            KeyValueRow(
+                "Best validation loss",
+                if (state.bestValLoss.isFinite() && state.bestValLoss != Float.MAX_VALUE) "%.5f".format(state.bestValLoss)
+                else "Belum dievaluasi"
+            )
             KeyValueRow("Learning rate", "%.2e".format(state.lr))
             KeyValueRow("Grad norm", "%.4f".format(state.gradNorm))
             KeyValueRow("Kecepatan", "%.1f token/detik".format(state.tokensPerSec))
