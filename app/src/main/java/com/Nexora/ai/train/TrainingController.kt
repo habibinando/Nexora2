@@ -78,6 +78,8 @@ data class TrainState(
     val importProgress: Float = 0f,
     /** Current internal operation being executed, updated by the training loop. */
     val operation: String = "",
+    /** Fraction of the active batch estimated from actual operation/layer callbacks. */
+    val batchProgress: Float = 0f,
     /** Monotonic duration of the current operation; refreshed while work is in progress. */
     val operationElapsedMs: Long = 0L
 )
@@ -106,6 +108,7 @@ object TrainingController {
     @Volatile private var resumeCheckpointCompatible = false
     @Volatile private var activeDatasetFingerprint: String = ""
     @Volatile private var liveOperationLabel: String = "Menyiapkan training"
+    @Volatile private var liveBatchProgress: Float = 0f
     @Volatile private var liveOperationStartedAtMs: Long = 0L
     private var heartbeatJob: Job? = null
 
@@ -113,7 +116,34 @@ object TrainingController {
     private fun reportOperation(label: String) {
         liveOperationLabel = label
         liveOperationStartedAtMs = SystemClock.elapsedRealtime()
-        _state.value = _state.value.copy(operation = label, operationElapsedMs = 0L)
+        // Operation callbacks arrive at real compute boundaries. Layer callbacks let
+        // the UI show partial progress even while one batch has not reached AdamW yet.
+        val layerMatch = Regex("layer\\s+(\\d+)\\s*/\\s*(\\d+)", RegexOption.IGNORE_CASE).find(label)
+        val layerFraction = layerMatch?.let {
+            val current = it.groupValues[1].toFloatOrNull() ?: 0f
+            val total = it.groupValues[2].toFloatOrNull() ?: 1f
+            if (total > 0f) (current / total).coerceIn(0f, 1f) else 0f
+        }
+        val stageFraction = when {
+            label.contains("menyiapkan batch", true) -> 0.01f
+            label.contains("zero-grad", true) -> 0.03f
+            label.contains("forward", true) && layerFraction != null -> 0.05f + 0.35f * layerFraction
+            label.contains("forward", true) -> 0.05f
+            label.contains("cross-entropy", true) -> 0.43f
+            label.contains("backward", true) && layerFraction != null -> 0.45f + 0.43f * layerFraction
+            label.contains("backward", true) -> 0.45f
+            label.contains("gradient norm", true) -> 0.91f
+            label.contains("adamw", true) -> 0.97f
+            label.contains("validasi", true) -> 0.98f
+            label.contains("checkpoint", true) -> 0.995f
+            else -> liveBatchProgress.coerceAtLeast(0.01f)
+        }
+        liveBatchProgress = maxOf(liveBatchProgress, stageFraction).coerceIn(0f, 0.999f)
+        _state.value = _state.value.copy(
+            operation = label,
+            batchProgress = liveBatchProgress,
+            operationElapsedMs = 0L
+        )
     }
 
     private fun estimateModelParams(cfg: ModelConfig): Long {
@@ -366,6 +396,7 @@ object TrainingController {
                         val now = SystemClock.elapsedRealtime()
                         _state.value = _state.value.copy(
                             operation = liveOperationLabel,
+                            batchProgress = liveBatchProgress,
                             operationElapsedMs = (now - liveOperationStartedAtMs).coerceAtLeast(0L)
                         )
                     }
@@ -512,6 +543,14 @@ object TrainingController {
                 }
                 if (stopped) break
 
+                liveBatchProgress = 0f
+                _state.value = _state.value.copy(
+                    currentEpoch = epochIndex + 1,
+                    batchInEpoch = batchIndex + 1,
+                    batchesInEpoch = stepsPerEpoch,
+                    batchProgress = 0f,
+                    step = step
+                )
                 reportOperation("Menyiapkan batch ${batchIndex + 1}/$stepsPerEpoch · mengambil token input/target")
                 val begin = batchIndex * B
                 val actualBatch = minOf(B, starts.size - begin)
@@ -534,6 +573,7 @@ object TrainingController {
                     currentEpoch = epochIndex + 1,
                     batchInEpoch = batchIndex + 1,
                     batchesInEpoch = stepsPerEpoch,
+                    batchProgress = liveBatchProgress,
                     step = step,
                     message = "Epoch ${epochIndex + 1}/${hp.epochs} · batch ${batchIndex + 1}/$stepsPerEpoch — forward pass…"
                 )
@@ -716,6 +756,7 @@ object TrainingController {
         currentEpoch = currentEpoch,
         batchInEpoch = batchIndex,
         batchesInEpoch = batchesPerEpoch,
+        batchProgress = 1f,
         loss = loss,
         valLoss = valLoss,
         bestValLoss = best,
