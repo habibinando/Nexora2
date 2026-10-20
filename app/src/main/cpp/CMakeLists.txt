@@ -6,14 +6,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_library(nexora-native SHARED
     native.cpp
-    gles_compute.cpp
+    vulkan_compute.cpp
 )
 
-# Real CPU maximization: Neon + multi-threading. GPU via GLES 3.1 compute.
+# CPU kernels use NEON + a native thread pool. GPU GEMM uses Vulkan compute.
 find_library(log-lib log)
 find_library(android-lib android)
-find_library(glesv3-lib GLESv3)
-find_library(egl-lib EGL)
+find_library(vulkan-lib vulkan)
+
+if(NOT vulkan-lib)
+    message(FATAL_ERROR "Android NDK Vulkan loader library was not found")
+endif()
 
 target_compile_options(nexora-native PRIVATE
     -O3 -ffast-math -fno-exceptions -fno-rtti
@@ -23,6 +26,5 @@ target_compile_options(nexora-native PRIVATE
 target_link_libraries(nexora-native
     ${log-lib}
     ${android-lib}
-    ${glesv3-lib}
-    ${egl-lib}
+    ${vulkan-lib}
 )
