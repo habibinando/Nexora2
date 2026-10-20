@@ -14,6 +14,8 @@ import kotlin.math.abs
 object NativeOps {
     init { System.loadLibrary("nexora-native") }
 
+    const val GPU_GEMM_MIN_WORK: Long = 8_000_000L
+
     data class ComputeStats(
         val cpuGemmCalls: Long,
         val gpuGemmCalls: Long,
@@ -72,7 +74,9 @@ object NativeOps {
     @JvmStatic private external fun nativeVulkanInit(assetManager: AssetManager): Boolean
     @JvmStatic private external fun nativeVulkanInfo(): String
     @JvmStatic private external fun nativeVulkanBench(M: Int, K: Int, N: Int, iter: Int): Double
-    @JvmStatic private external fun nativeVulkanMatMul(a: FloatArray, b: FloatArray, c: FloatArray, M: Int, K: Int, N: Int): Boolean
+    @JvmStatic private external fun nativeVulkanMatMul(
+        a: FloatArray, b: FloatArray, c: FloatArray, M: Int, K: Int, N: Int, accumulate: Boolean
+    )
 
     /**
      * Must be called on gpuExecutor. Shader creation alone isn't enough: compare Vulkan
@@ -113,7 +117,7 @@ object NativeOps {
             val actual = FloatArray(m * n)
 
             jniMatMul(inputA, inputB, expected, m, k, n, transA, transB, 1f, 0f)
-            if (!nativeVulkanMatMul(gpuA, gpuB, actual, m, k, n)) return false
+            if (!nativeVulkanMatMul(gpuA, gpuB, actual, m, k, n, false)) return false
 
             var maxError = 0f
             var maxReference = 0f
@@ -171,11 +175,11 @@ object NativeOps {
 
         val c = FloatArray(M * N)
         val work = M.toLong() * K.toLong() * N.toLong()
-        if (work >= 8_000_000L) {
+        if (work >= GPU_GEMM_MIN_WORK) {
             val gpuA = if (transA) transposeRowMajor(a, K, M) else a
             val gpuB = if (transB) transposeRowMajor(b, N, K) else b
             val gpuOk = gpuCall(false) {
-                validateGpuOnExecutor() && nativeVulkanMatMul(gpuA, gpuB, c, M, K, N)
+                validateGpuOnExecutor() && nativeVulkanMatMul(gpuA, gpuB, c, M, K, N, false)
             }
             if (gpuOk) {
                 gpuGemmCalls.incrementAndGet()
@@ -185,6 +189,36 @@ object NativeOps {
         }
         nativeMatMul(a, b, c, M, K, N, transA, transB, 1f, 0f)
         return c
+    }
+
+    /**
+     * Accumulate op(A) * op(B) into the existing C buffer.
+     * Large gradient matrices use the same accuracy-validated Vulkan path and let the
+     * shader read the existing C value before adding; CPU fallback preserves beta=1 semantics.
+     */
+    fun matmulAccumulate(
+        a: FloatArray, b: FloatArray, c: FloatArray,
+        M: Int, K: Int, N: Int,
+        transA: Boolean = false, transB: Boolean = false
+    ) {
+        require(M > 0 && K > 0 && N > 0) { "Matrix dimensions must be positive" }
+        require(a.size.toLong() >= M.toLong() * K && b.size.toLong() >= K.toLong() * N &&
+            c.size.toLong() >= M.toLong() * N) { "Matrix buffer is too small for accumulating GEMM" }
+
+        val work = M.toLong() * K.toLong() * N.toLong()
+        if (work >= GPU_GEMM_MIN_WORK) {
+            val gpuA = if (transA) transposeRowMajor(a, K, M) else a
+            val gpuB = if (transB) transposeRowMajor(b, N, K) else b
+            val gpuOk = gpuCall(false) {
+                validateGpuOnExecutor() && nativeVulkanMatMul(gpuA, gpuB, c, M, K, N, true)
+            }
+            if (gpuOk) {
+                gpuGemmCalls.incrementAndGet()
+                return
+            }
+            gpuFallbacks.incrementAndGet()
+        }
+        nativeMatMul(a, b, c, M, K, N, transA, transB, 1f, 1f)
     }
 
     /** Transpose row-major [rows x cols] into [cols x rows]. */

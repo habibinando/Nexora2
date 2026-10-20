@@ -140,6 +140,7 @@ fun LabScreen() {
             KeyValueRow("GEMM Vulkan berhasil", compute.gpuGemmCalls.toString())
             KeyValueRow("GEMM CPU", compute.cpuGemmCalls.toString())
             KeyValueRow("Fallback Vulkan → CPU", compute.gpuFallbacks.toString())
+            KeyValueRow("Ambang GEMM GPU", "${NativeOps.GPU_GEMM_MIN_WORK} operasi perkalian-akumulasi")
             Text(
                 "Versi API Vulkan yang didukung GPU ditampilkan terpisah dari versi fitur yang dipakai aplikasi. Nexora hanya mengirim GEMM besar ke Vulkan setelah tes akurasi; attention, backpropagation, optimizer, dan operasi lain masih menggunakan CPU. Nol GEMM Vulkan berarti belum ada operasi yang sukses melewati jalur GPU pada hitungan saat ini.",
                 color = NexoraMuted, fontSize = 11.sp

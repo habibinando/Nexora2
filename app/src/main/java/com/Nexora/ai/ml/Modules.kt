@@ -89,7 +89,7 @@ class Linear(
         val x = cacheX!!
         if (!frozenBase) {
             // dW = x^T @ gy  (inF x T) @ (T x outF)
-            NativeOps.nativeMatMul(x, gy, wg, inF, T, outF, true, false, 1f, 1f)
+            NativeOps.matmulAccumulate(x, gy, wg, inF, T, outF, transA = true)
         }
         if (bg != null) {
             for (t in 0 until T) {
@@ -471,7 +471,7 @@ class GPT(val cfg: ModelConfig, val rng: Random = Random(1337)) {
         // dX = gradLogits @ tokEmb.w  (T x vocab) @ (vocab x d)
         var dX = NativeOps.matmul(gradLogits, tokEmb.w, T, cfg.vocabSize, d)
         // tied weight grad: dW = gradLogits^T @ x  (vocab x T) @ (T x d)
-        NativeOps.nativeMatMul(gradLogits, x, tokEmb.wg, cfg.vocabSize, T, d, true, false, 1f, 1f)
+        NativeOps.matmulAccumulate(gradLogits, x, tokEmb.wg, cfg.vocabSize, T, d, transA = true)
         dX = lnF.backward(dX, T)
         for (i in blocks.indices.reversed()) dX = blocks[i].backward(dX, T)
         drop.backward(dX)

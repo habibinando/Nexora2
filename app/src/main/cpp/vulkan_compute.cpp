@@ -237,7 +237,7 @@ struct VulkanState {
         VkPushConstantRange pushRange{};
         pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         pushRange.offset = 0;
-        pushRange.size = sizeof(int32_t) * 3;
+        pushRange.size = sizeof(int32_t) * 4;
         VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
         pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         pipelineLayoutInfo.setLayoutCount = 1;
@@ -419,7 +419,7 @@ struct VulkanState {
         return result == VK_SUCCESS || fail("vkInvalidateMappedMemoryRanges", result);
     }
 
-    bool matmul(const float* A, const float* B, float* C, int M, int K, int N) {
+    bool matmul(const float* A, const float* B, float* C, int M, int K, int N, bool accumulate = false) {
         if (!ok || M <= 0 || K <= 0 || N <= 0) return false;
         const uint64_t na = static_cast<uint64_t>(M) * static_cast<uint64_t>(K) * sizeof(float);
         const uint64_t nb = static_cast<uint64_t>(K) * static_cast<uint64_t>(N) * sizeof(float);
@@ -429,7 +429,8 @@ struct VulkanState {
 
         std::memcpy(a.mapped, A, static_cast<size_t>(na));
         std::memcpy(b.mapped, B, static_cast<size_t>(nb));
-        if (!flushIfNeeded(a) || !flushIfNeeded(b)) return false;
+        if (accumulate) std::memcpy(c.mapped, C, static_cast<size_t>(nc));
+        if (!flushIfNeeded(a) || !flushIfNeeded(b) || (accumulate && !flushIfNeeded(c))) return false;
 
         VkDescriptorBufferInfo infos[3]{};
         infos[0] = {a.buffer, 0, na};
@@ -457,7 +458,7 @@ struct VulkanState {
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                                 pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
-        const int32_t dims[3] = {M, K, N};
+        const int32_t dims[4] = {M, K, N, accumulate ? 1 : 0};
         vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
                            0, sizeof(dims), dims);
         vkCmdDispatch(commandBuffer, static_cast<uint32_t>((N + 15) / 16),
@@ -526,7 +527,7 @@ Java_com_Nexora_ai_ml_NativeOps_nativeVulkanBench(JNIEnv*, jclass, jint M, jint 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_Nexora_ai_ml_NativeOps_nativeVulkanMatMul(
         JNIEnv* env, jclass, jfloatArray aArr, jfloatArray bArr, jfloatArray cArr,
-        jint M, jint K, jint N) {
+        jint M, jint K, jint N, jboolean accumulate) {
     if (M <= 0 || K <= 0 || N <= 0) return JNI_FALSE;
     const jlong aNeed = static_cast<jlong>(M) * K;
     const jlong bNeed = static_cast<jlong>(K) * N;
@@ -553,7 +554,7 @@ Java_com_Nexora_ai_ml_NativeOps_nativeVulkanMatMul(
         return JNI_FALSE;
     }
 
-    const bool success = s->matmul(A, B, C, M, K, N);
+    const bool success = s->matmul(A, B, C, M, K, N, accumulate != JNI_FALSE);
     env->ReleaseFloatArrayElements(aArr, A, JNI_ABORT);
     env->ReleaseFloatArrayElements(bArr, B, JNI_ABORT);
     env->ReleaseFloatArrayElements(cArr, C, success ? 0 : JNI_ABORT);
