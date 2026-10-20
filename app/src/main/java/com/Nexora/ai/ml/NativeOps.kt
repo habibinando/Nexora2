@@ -1,10 +1,16 @@
 package com.Nexora.ai.ml
 
+import android.content.Context
+import android.content.res.AssetManager
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 
-/** JNI compute. Large GEMMs attempt GLES on one EGL-safe thread and fall back to CPU. */
+/**
+ * Native CPU + Vulkan compute.
+ * Large GEMMs use Vulkan only after runtime shader/device initialization and numerical
+ * comparison against the CPU implementation. Unsupported devices always fall back to CPU.
+ */
 object NativeOps {
     init { System.loadLibrary("nexora-native") }
 
@@ -18,13 +24,17 @@ object NativeOps {
     private val gpuGemmCalls = AtomicLong()
     private val gpuFallbacks = AtomicLong()
 
-    // EGL contexts are thread-affine. All GPU operations run on the same persistent thread.
+    // Keep Vulkan device/queue/command-buffer calls serialized on one thread.
     private val gpuExecutor = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "Nexora-GLES").apply { isDaemon = true }
+        Thread(runnable, "Nexora-Vulkan").apply { isDaemon = true }
     }
-
-    // Accessed only from gpuExecutor; cached so validation runs once per process.
+    private var appAssets: AssetManager? = null
     private var gpuValidationResult: Boolean? = null
+
+    /** Store application assets for loading the packaged SPIR-V shader. No network or API key. */
+    fun initialize(context: Context) {
+        appAssets = context.applicationContext.assets
+    }
 
     private fun <T> gpuCall(fallback: T, block: () -> T): T = try {
         gpuExecutor.submit<T> { block() }.get()
@@ -43,7 +53,7 @@ object NativeOps {
         M: Int, K: Int, N: Int, transA: Boolean, transB: Boolean, alpha: Float, beta: Float
     )
 
-    /** Counts CPU matrix operations from both forward and backward passes. */
+    /** Counts CPU matrix operations used by forward/backward/training. */
     fun nativeMatMul(
         a: FloatArray, b: FloatArray, c: FloatArray,
         M: Int, K: Int, N: Int, transA: Boolean, transB: Boolean, alpha: Float, beta: Float
@@ -59,21 +69,25 @@ object NativeOps {
     @JvmStatic external fun nativeAxpy(y: FloatArray, x: FloatArray, alpha: Float, n: Int)
     @JvmStatic external fun nativeBenchMatMul(M: Int, K: Int, N: Int, iter: Int): Double
 
-    @JvmStatic private external fun nativeGpuInit(): Boolean
-    @JvmStatic private external fun nativeGpuInfo(): String
-    @JvmStatic private external fun nativeGpuBench(M: Int, K: Int, N: Int, iter: Int): Double
-    @JvmStatic private external fun nativeGpuMatMul(a: FloatArray, b: FloatArray, c: FloatArray, M: Int, K: Int, N: Int): Boolean
+    @JvmStatic private external fun nativeVulkanInit(assetManager: AssetManager): Boolean
+    @JvmStatic private external fun nativeVulkanInfo(): String
+    @JvmStatic private external fun nativeVulkanBench(M: Int, K: Int, N: Int, iter: Int): Double
+    @JvmStatic private external fun nativeVulkanMatMul(a: FloatArray, b: FloatArray, c: FloatArray, M: Int, K: Int, N: Int): Boolean
 
     /**
-     * Runs exclusively on gpuExecutor. Shader compilation alone does not prove that
-     * the result is correct, so compare a non-tile-aligned GPU GEMM against the CPU.
-     * Dimensions 17x19x13 intentionally exercise the shader's edge-tile bounds.
+     * Must be called on gpuExecutor. Shader creation alone isn't enough: compare Vulkan
+     * results against the CPU for non-multiple-of-16 edge tiles and every transpose mode.
      */
     private fun validateGpuOnExecutor(): Boolean {
         gpuValidationResult?.let { return it }
 
+        val assets = appAssets
+        if (assets == null) {
+            gpuValidationResult = false
+            return false
+        }
         val ready = try {
-            nativeGpuInit()
+            nativeVulkanInit(assets)
         } catch (_: Exception) {
             false
         }
@@ -98,9 +112,8 @@ object NativeOps {
             val expected = FloatArray(m * n)
             val actual = FloatArray(m * n)
 
-            // CPU reference uses the same transposition contract as the training code.
             jniMatMul(inputA, inputB, expected, m, k, n, transA, transB, 1f, 0f)
-            if (!nativeGpuMatMul(gpuA, gpuB, actual, m, k, n)) return false
+            if (!nativeVulkanMatMul(gpuA, gpuB, actual, m, k, n)) return false
 
             var maxError = 0f
             var maxReference = 0f
@@ -111,8 +124,6 @@ object NativeOps {
             return maxError <= 1e-3f * maxOf(1f, maxReference)
         }
 
-        // Include edge tiles and every transA/transB combination, since the training
-        // code uses transposed matrices during backward propagation and weight updates.
         val passed = try {
             casePasses(false, false) &&
                 casePasses(true, false) &&
@@ -121,42 +132,42 @@ object NativeOps {
         } catch (_: Exception) {
             false
         }
-
         gpuValidationResult = passed
         return passed
     }
 
     fun gpuInit(): Boolean = gpuCall(false) { validateGpuOnExecutor() }
 
-    fun gpuInfo(): String = gpuCall("GPU tidak tersedia atau gagal diinisialisasi") {
+    fun gpuInfo(): String = gpuCall("Vulkan tidak tersedia atau gagal diinisialisasi") {
         val passed = validateGpuOnExecutor()
-        val info = nativeGpuInfo()
-        if (passed) "$info | tes numerik GPU: LULUS"
-        else "$info | tes numerik GPU: GAGAL; GEMM besar dialihkan ke CPU"
+        val info = nativeVulkanInfo()
+        if (passed) "$info | tes akurasi GEMM: LULUS"
+        else "$info | tes akurasi GEMM: GAGAL; operasi besar dialihkan ke CPU"
     }
 
-    fun gpuBench(M: Int, K: Int, N: Int, iter: Int): Double =
-        gpuCall(-1.0) {
-            if (validateGpuOnExecutor()) nativeGpuBench(M, K, N, iter) else -1.0
-        }
+    fun gpuBench(M: Int, K: Int, N: Int, iter: Int): Double = gpuCall(-1.0) {
+        if (validateGpuOnExecutor()) nativeVulkanBench(M, K, N, iter) else -1.0
+    }
 
     fun computeStats() = ComputeStats(cpuGemmCalls.get(), gpuGemmCalls.get(), gpuFallbacks.get())
 
-    /** Clear counters so displayed numbers describe only the next measured phase. */
     fun resetComputeStats() {
         cpuGemmCalls.set(0)
         gpuGemmCalls.set(0)
         gpuFallbacks.set(0)
     }
 
-    /** C = op(A) * op(B). Transposed inputs are prepared for the GLES row-major shader. */
+    /** C = op(A) * op(B). Vulkan receives row-major matrices with transposes prepared. */
     fun matmul(
         a: FloatArray, b: FloatArray, M: Int, K: Int, N: Int,
         transA: Boolean = false, transB: Boolean = false
     ): FloatArray {
         require(M > 0 && K > 0 && N > 0) { "Matrix dimensions must be positive" }
-        require(a.size >= (if (transA) K * M else M * K)) { "Matrix A buffer is too small" }
-        require(b.size >= (if (transB) N * K else K * N)) { "Matrix B buffer is too small" }
+        val expectedA = M.toLong() * K
+        val expectedB = K.toLong() * N
+        require(a.size.toLong() >= expectedA && b.size.toLong() >= expectedB) {
+            "Matrix buffer is too small for requested dimensions"
+        }
 
         val c = FloatArray(M * N)
         val work = M.toLong() * K.toLong() * N.toLong()
@@ -164,7 +175,7 @@ object NativeOps {
             val gpuA = if (transA) transposeRowMajor(a, K, M) else a
             val gpuB = if (transB) transposeRowMajor(b, N, K) else b
             val gpuOk = gpuCall(false) {
-                validateGpuOnExecutor() && nativeGpuMatMul(gpuA, gpuB, c, M, K, N)
+                validateGpuOnExecutor() && nativeVulkanMatMul(gpuA, gpuB, c, M, K, N)
             }
             if (gpuOk) {
                 gpuGemmCalls.incrementAndGet()
@@ -178,7 +189,9 @@ object NativeOps {
 
     /** Transpose row-major [rows x cols] into [cols x rows]. */
     private fun transposeRowMajor(src: FloatArray, rows: Int, cols: Int): FloatArray {
-        require(src.size >= rows * cols) { "Matrix buffer too small for transpose ($rows x $cols)" }
+        require(src.size.toLong() >= rows.toLong() * cols.toLong()) {
+            "Matrix buffer too small for transpose ($rows x $cols)"
+        }
         val dst = FloatArray(rows * cols)
         for (r in 0 until rows) {
             val offset = r * cols
