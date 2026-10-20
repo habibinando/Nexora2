@@ -176,6 +176,9 @@ fun TrainScreen() {
             LabeledSlider("Gradient clipping", hp.gradClip.toDouble(), 0.5..5.0, { "%.1f".format(it) }, enabled = settingsEnabled) {
                 AppSettings.updateHp { p -> p.copy(gradClip = it.toFloat().coerceIn(0.5f, 5f)) }
             }
+            LabeledSlider("Weight decay", hp.weightDecay.toDouble(), 0.0..0.1, { "%.3f".format(it) }, enabled = settingsEnabled) {
+                AppSettings.updateHp { p -> p.copy(weightDecay = it.toFloat().coerceIn(0f, 0.1f)) }
+            }
             LabeledSlider(
                 "Thread CPU (0 = otomatis/semua core)",
                 hp.numThreads.toDouble(),
