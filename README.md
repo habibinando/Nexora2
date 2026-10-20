@@ -26,7 +26,7 @@ checkpoint periodik sehingga **bobot terus bertambah** antar sesi.
 | Fitur | Lokasi kode |
 |---|---|
 | Transformer decoder (dModel 128, FFN 512, 32 layer, 8 head, seq 128, vocab 16k) + backward manual | `ml/Modules.kt` |
-| LoRA (rank/alpha dapat diatur, base weight dibekukan) pada Q/K/V/O & MLP | `Linear` di `Modules.kt` |
+| LoRA opsional pada Q/K/V/O & MLP; default nonaktif untuk training dari nol karena base weight awalnya acak | `Linear` di `Modules.kt`, `ui/AppSettings.kt` |
 | AdamW + weight decay + gradient clipping | `ml/Optimizer.kt` |
 | Cosine LR schedule dengan warmup | `CosineWarmupScheduler` |
 | Dropout (inverted, mask disimpan untuk backward) | `Dropout` |
@@ -68,6 +68,5 @@ Minimum Android SDK is now API 31 (Android 12). Vulkan is an optional device fea
 - Workflow CI menjalankan Gradle dengan JDK 25 tetapi menghasilkan bytecode Java 21. Instalasi Android API 37 diverifikasi dengan pemeriksaan `android.jar`.
 - Tidak ada permission INTERNET → aplikasi sepenuhnya offline.
 - Tokenizer dibangun dari dataset yang Anda impor (word-level + byte fallback).
-- Untuk kecepatan terbaik, gunakan LoRA (default aktif) — trainable params jauh
-  lebih kecil sementara base weight tetap disimpan di checkpoint.
+- Untuk training dari nol, LoRA default nonaktif agar semua bobot linear belajar. Aktifkan LoRA hanya saat memakai bobot dasar terlatih yang kompatibel; saat aktif, base weights dibekukan dan jumlah parameter trainable berkurang.
 - Ubah arsitektur model di tab **Lab**; diterapkan pada impor dataset berikutnya.
