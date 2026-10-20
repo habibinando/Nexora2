@@ -76,7 +76,7 @@ object NativeOps {
     @JvmStatic private external fun nativeVulkanBench(M: Int, K: Int, N: Int, iter: Int): Double
     @JvmStatic private external fun nativeVulkanMatMul(
         a: FloatArray, b: FloatArray, c: FloatArray, M: Int, K: Int, N: Int, accumulate: Boolean
-    )
+    ): Boolean
 
     /**
      * Must be called on gpuExecutor. Shader creation alone isn't enough: compare Vulkan
