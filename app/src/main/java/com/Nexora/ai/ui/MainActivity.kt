@@ -34,6 +34,8 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -148,9 +150,34 @@ fun MainScaffold() {
 
     Scaffold(
         containerColor = NexoraBg,
+        topBar = {
+            TopAppBar(
+                title = {
+                    androidx.compose.foundation.layout.Row(
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Nexora",
+                            color = com.Nexora.ai.ui.theme.ElectricCyan,
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 19.sp
+                        )
+                        Text(
+                            " • Studio On-Device",
+                            color = NexoraMuted,
+                            fontSize = 12.sp
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = com.Nexora.ai.ui.theme.CyberSurface,
+                    titleContentColor = NexoraOnSurface
+                )
+            )
+        },
         bottomBar = {
             NavigationBar(
-                containerColor = Color(0xFF0A1018),
+                containerColor = com.Nexora.ai.ui.theme.CyberSurfaceCard,
                 contentColor = NexoraOnSurface,
                 tonalElevation = 0.dp
             ) {
@@ -173,7 +200,7 @@ fun MainScaffold() {
                                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
                             )
                         },
-                        alwaysShowLabel = false,
+                        alwaysShowLabel = true,
                         colors = NavigationBarItemDefaults.colors(
                             selectedIconColor = NexoraPrimary,
                             selectedTextColor = NexoraPrimary,
