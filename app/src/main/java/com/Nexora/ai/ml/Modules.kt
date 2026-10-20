@@ -447,9 +447,13 @@ class GPT(val cfg: ModelConfig, val rng: Random = Random(1337)) {
             return n
         }
 
-    fun forward(tokens: IntArray, B: Int, S: Int, training: Boolean): FloatArray {
+    fun forward(
+        tokens: IntArray, B: Int, S: Int, training: Boolean,
+        onProgress: ((String) -> Unit)? = null
+    ): FloatArray {
         this.B = B; this.S = S; cacheTokens = tokens
         val T = B * S
+        onProgress?.invoke("Forward · embedding token dan posisi")
         var x = tokEmb.forward(tokens)
         for (t in 0 until T) {
             val pos = t % S
@@ -457,7 +461,11 @@ class GPT(val cfg: ModelConfig, val rng: Random = Random(1337)) {
             for (d in 0 until cfg.dModel) x[o + d] += posEmb[po + d]
         }
         x = drop.forward(x, training, rng)
-        for (block in blocks) x = block.forward(x, B, S, training, rng)
+        for ((index, block) in blocks.withIndex()) {
+            onProgress?.invoke("Forward · transformer layer ${index + 1}/${blocks.size}")
+            x = block.forward(x, B, S, training, rng)
+        }
+        onProgress?.invoke("Forward · norm akhir dan proyeksi logits")
         x = lnF.forward(x, T)
         cacheX = x
         // logits = x @ tokEmb.w^T (weight tying): x T x d, w vocab x d -> need w^T d x vocab
@@ -465,15 +473,20 @@ class GPT(val cfg: ModelConfig, val rng: Random = Random(1337)) {
     }
 
     /** gradLogits: T x vocab (already softmax-onehot scaled). Returns loss. */
-    fun backward(gradLogits: FloatArray): FloatArray {
+    fun backward(gradLogits: FloatArray, onProgress: ((String) -> Unit)? = null): FloatArray {
         val T = B * S; val d = cfg.dModel
         val x = cacheX!!
+        onProgress?.invoke("Backward · proyeksi output dan gradien embedding tertaut")
         // dX = gradLogits @ tokEmb.w  (T x vocab) @ (vocab x d)
         var dX = NativeOps.matmul(gradLogits, tokEmb.w, T, cfg.vocabSize, d)
         // tied weight grad: dW = gradLogits^T @ x  (vocab x T) @ (T x d)
         NativeOps.matmulAccumulate(gradLogits, x, tokEmb.wg, cfg.vocabSize, T, d, transA = true)
         dX = lnF.backward(dX, T)
-        for (i in blocks.indices.reversed()) dX = blocks[i].backward(dX, T)
+        for (i in blocks.indices.reversed()) {
+            onProgress?.invoke("Backward · transformer layer ${i + 1}/${blocks.size}")
+            dX = blocks[i].backward(dX, T)
+        }
+        onProgress?.invoke("Backward · embedding dan gradien posisi")
         drop.backward(dX)
         // pos emb grad
         val tokens = cacheTokens!!
