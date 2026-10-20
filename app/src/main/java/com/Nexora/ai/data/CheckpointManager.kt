@@ -5,6 +5,8 @@ import com.Nexora.ai.ml.ModelConfig
 import com.Nexora.ai.ml.AdamW
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -47,27 +49,27 @@ class CheckpointManager(private val dir: File) {
         if (!staging.mkdirs()) throw IllegalStateException("Cannot create checkpoint staging directory")
 
         try {
-            DataOutputStream(FileOutputStream(File(staging, "config.bin"))).use { o ->
+            DataOutputStream(BufferedOutputStream(FileOutputStream(File(staging, "config.bin"))).use { o ->
                 val c = model.cfg
                 o.writeInt(c.vocabSize); o.writeInt(c.seqLen); o.writeInt(c.dModel); o.writeInt(c.ffnDim)
                 o.writeInt(c.numHeads); o.writeInt(c.numLayers); o.writeFloat(c.dropout)
                 o.writeBoolean(c.useLora); o.writeInt(c.loraRank); o.writeInt(c.loraAlpha); o.writeFloat(c.layerNormEps)
             }
-            DataOutputStream(FileOutputStream(File(staging, "tokenizer.bin"))).use { tokenizer.save(it) }
-            DataOutputStream(FileOutputStream(File(staging, "tensors.bin"))).use { o ->
+            DataOutputStream(BufferedOutputStream(FileOutputStream(File(staging, "tokenizer.bin"))).use { tokenizer.save(it) }
+            DataOutputStream(BufferedOutputStream(FileOutputStream(File(staging, "tensors.bin"))).use { o ->
                 for (tensor in model.allTensors()) {
                     o.writeInt(tensor.size)
                     for (value in tensor) o.writeFloat(value)
                 }
             }
-            DataOutputStream(FileOutputStream(File(staging, "optimizer.bin"))).use { o ->
+            DataOutputStream(BufferedOutputStream(FileOutputStream(File(staging, "optimizer.bin"))).use { o ->
                 o.writeInt(optimizer.step)
                 for ((m, v) in optimizer.state()) {
                     o.writeInt(m.size); for (value in m) o.writeFloat(value)
                     o.writeInt(v.size); for (value in v) o.writeFloat(value)
                 }
             }
-            DataOutputStream(FileOutputStream(File(staging, "meta.bin"))).use { o ->
+            DataOutputStream(BufferedOutputStream(FileOutputStream(File(staging, "meta.bin"))).use { o ->
                 o.writeInt(meta.step); o.writeInt(meta.epoch); o.writeFloat(meta.bestValLoss)
                 o.writeInt(meta.patienceCount); o.writeLong(meta.tokensSeen)
                 o.writeInt(meta.lossHistory.size)
@@ -98,7 +100,7 @@ class CheckpointManager(private val dir: File) {
         val f = File(dir, "config.bin")
         if (!f.exists()) return null
         return try {
-            DataInputStream(FileInputStream(f)).use { i ->
+            DataInputStream(BufferedInputStream(FileInputStream(f), 1 shl 20)).use { i ->
                 ModelConfig(
                     vocabSize = i.readInt(), seqLen = i.readInt(), dModel = i.readInt(),
                     ffnDim = i.readInt(), numHeads = i.readInt(), numLayers = i.readInt(),
@@ -110,11 +112,11 @@ class CheckpointManager(private val dir: File) {
     }
 
     fun loadTokenizer(): Tokenizer? = try {
-        DataInputStream(FileInputStream(File(dir, "tokenizer.bin"))).use { Tokenizer.load(it) }
+        DataInputStream(BufferedInputStream(FileInputStream(File(dir, "tokenizer.bin")), 1 shl 20)).use { Tokenizer.load(it) }
     } catch (_: Exception) { null }
 
     fun loadTensors(model: GPT): Boolean = try {
-        DataInputStream(FileInputStream(File(dir, "tensors.bin"))).use { i ->
+        DataInputStream(BufferedInputStream(FileInputStream(File(dir, "tensors.bin")), 1 shl 20)).use { i ->
             for (t in model.allTensors()) {
                 val n = i.readInt()
                 require(n == t.size)
@@ -125,23 +127,38 @@ class CheckpointManager(private val dir: File) {
     } catch (_: Exception) { false }
 
     fun loadOptimizerState(optimizer: AdamW): Pair<Int, List<Pair<FloatArray, FloatArray>>>? = try {
-        DataInputStream(FileInputStream(File(dir, "optimizer.bin"))).use { i ->
-            val step = i.readInt()
-            val state = optimizer.state().map { (m, v) ->
-                val nm = FloatArray(i.readInt()) { i.readFloat() }
-                val nv = FloatArray(i.readInt()) { i.readFloat() }
-                nm to nv
+        DataInputStream(BufferedInputStream(FileInputStream(File(dir, "optimizer.bin")), 1 shl 20)).use { input ->
+            val step = input.readInt()
+            require(step >= 0) { "Invalid optimizer step" }
+            val expected = optimizer.state()
+            val restored = ArrayList<Pair<FloatArray, FloatArray>>(expected.size)
+            for ((mExpected, vExpected) in expected) {
+                val nmSize = input.readInt()
+                require(nmSize == mExpected.size) { "Optimizer first-moment tensor size mismatch" }
+                val nm = FloatArray(nmSize) { input.readFloat() }
+                val nvSize = input.readInt()
+                require(nvSize == vExpected.size) { "Optimizer second-moment tensor size mismatch" }
+                val nv = FloatArray(nvSize) { input.readFloat() }
+                restored += nm to nv
             }
-            step to state
+            require(input.read() == -1) { "Unexpected trailing optimizer checkpoint data" }
+            step to restored
         }
     } catch (_: Exception) { null }
 
     fun loadMeta(): Meta? = try {
-        DataInputStream(FileInputStream(File(dir, "meta.bin"))).use { i ->
-            val step = i.readInt(); val epoch = i.readInt(); val best = i.readFloat()
-            val patience = i.readInt(); val tokens = i.readLong()
-            val n = i.readInt(); val hist = List(n) { i.readFloat() }
-            Meta(step, epoch, best, patience, hist, tokens)
+        DataInputStream(BufferedInputStream(FileInputStream(File(dir, "meta.bin")), 1 shl 20)).use { input ->
+            val step = input.readInt()
+            val epoch = input.readInt()
+            val best = input.readFloat()
+            val patience = input.readInt()
+            val tokens = input.readLong()
+            val count = input.readInt()
+            require(step >= 0 && epoch >= 0 && patience >= 0 && tokens >= 0L)
+            require(count in 0..500) { "Invalid loss history size" }
+            val history = List(count) { input.readFloat().also { loss -> require(loss.isFinite()) } }
+            require(best.isFinite() || best == Float.MAX_VALUE)
+            Meta(step, epoch, best, patience, history, tokens)
         }
     } catch (_: Exception) { null }
 
