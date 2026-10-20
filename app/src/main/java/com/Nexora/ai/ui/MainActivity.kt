@@ -24,7 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.TrackChanges
 import androidx.compose.material3.Icon
@@ -126,7 +126,7 @@ fun MainScaffold() {
     val context = androidx.compose.ui.platform.LocalContext.current
     val items = listOf(
         NavItem("home", "Home", Icons.Filled.Home),
-        NavItem("dataset", "Data", Icons.Filled.InsertDriveFile),
+        NavItem("dataset", "Data", Icons.AutoMirrored.Filled.InsertDriveFile),
         NavItem("train", "Train", Icons.Filled.TrackChanges),
         NavItem("chat", "Chat", Icons.AutoMirrored.Filled.Chat),
         NavItem("lab", "Lab", Icons.Filled.Science)
