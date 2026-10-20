@@ -41,7 +41,7 @@ class TrainingService : Service() {
                 val nm = getSystemService(NotificationManager::class.java)
                 nm.notify(NOTIF_ID, buildNotification(
                     "Nexora — step ${s.step}",
-                    "${s.phase.name} · loss ${String.format("%.4f", s.loss)} · ${s.tokensPerSec.toInt()} tok/s"
+                    "${s.phase.name} · ${if (s.loss.isFinite()) "loss ${String.format("%.4f", s.loss)}" else "loss belum tersedia"} · ${s.tokensPerSec.toInt()} tok/s"
                 ))
                 if (s.phase != Phase.RUNNING && s.phase != Phase.PAUSED) {
                     stopSelf()
