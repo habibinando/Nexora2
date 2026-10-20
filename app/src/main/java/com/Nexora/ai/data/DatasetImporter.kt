@@ -280,21 +280,43 @@ object DatasetImporter {
         } catch (_: Exception) {
             return null
         }
+
+        fun stringValue(value: kotlinx.serialization.json.JsonElement?): String? {
+            val primitive = value as? kotlinx.serialization.json.JsonPrimitive ?: return null
+            return if (primitive.isString) primitive.content else null
+        }
+
+        fun flattenContent(value: kotlinx.serialization.json.JsonElement?): String? {
+            if (value == null) return null
+            stringValue(value)?.let { return it }
+            return when (value) {
+                is JsonArray -> value.mapNotNull { flattenContent(it) }
+                    .filter { it.isNotBlank() }.joinToString("\n").ifBlank { null }
+                is JsonObject -> {
+                    val preferred = listOf("text", "content", "message", "value", "body")
+                    preferred.firstNotNullOfOrNull { key ->
+                        flattenContent(value[key])
+                    } ?: value.values.mapNotNull { stringValue(it) }
+                        .filter { it.isNotBlank() }.joinToString("\n").ifBlank { null }
+                }
+                else -> null
+            }
+        }
+
         return when (element) {
             is JsonObject -> {
-                element["text"]?.jsonPrimitive?.content
-                    ?: element["content"]?.jsonPrimitive?.content
-                    ?: element["message"]?.jsonPrimitive?.content
-                    ?: element.values.firstOrNull {
-                        it is kotlinx.serialization.json.JsonPrimitive && it.isString
-                    }?.jsonPrimitive?.content
+                val preferred = listOf(
+                    "text", "content", "message", "prompt", "instruction",
+                    "input", "output", "completion", "response", "answer"
+                )
+                preferred.firstNotNullOfOrNull { key -> flattenContent(element[key]) }
+                    ?: flattenContent(element["messages"])
+                    ?: flattenContent(element["conversation"])
+                    ?: element.values.mapNotNull { stringValue(it) }
+                        .filter { it.isNotBlank() }.joinToString("\n").ifBlank { null }
             }
-            is JsonArray -> element.firstOrNull {
-                it is kotlinx.serialization.json.JsonPrimitive && it.isString
-            }?.jsonPrimitive?.content
-            else -> if (
-                element is kotlinx.serialization.json.JsonPrimitive && element.isString
-            ) element.content else null
+            is JsonArray -> flattenContent(element)
+            else -> stringValue(element)
         }
     }
 
