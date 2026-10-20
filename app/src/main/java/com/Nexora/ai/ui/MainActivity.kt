@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.TrackChanges
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.NavigationBar
@@ -122,6 +123,7 @@ fun LoadingScreen() {
 
 private data class NavItem(val route: String, val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector)
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScaffold() {
     val nav = rememberNavController()
