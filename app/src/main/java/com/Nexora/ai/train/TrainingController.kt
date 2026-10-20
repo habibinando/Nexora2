@@ -368,6 +368,10 @@ object TrainingController {
             while (paused && !stopped) delay(200)
             if (stopped) break
 
+            // Chat inference shares this GPT instance and mutates its forward-pass caches.
+            // Hold the model monitor for the complete step (including validation) so inference
+            // cannot overwrite those caches between forward and backward.
+            synchronized(m) {
             val stepStart = System.currentTimeMillis()
             // Sample random batch windows
             val input = IntArray(T); val target = IntArray(T)
@@ -450,6 +454,7 @@ object TrainingController {
                 _state.value = _state.value.copy(message = "Menyimpan checkpoint — step $step…")
                 saveCheckpoint(m, optimizer, tok, step, bestVal, patienceCount, history, tokensSeen)
                 _state.value = _state.value.copy(message = "Checkpoint disimpan (step $step). Bobot terus bertambah.")
+            }
             }
         }
         _state.value = _state.value.copy(message = "Menyimpan checkpoint akhir…")
