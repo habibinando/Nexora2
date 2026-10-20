@@ -62,7 +62,7 @@ object DeviceDiagnostics {
 
         return Report(
             device = listOf(Build.MANUFACTURER, Build.MODEL).filter { it.isNotBlank() }.joinToString(" "),
-            androidVersion = "\${Build.VERSION.RELEASE} (API \${Build.VERSION.SDK_INT})",
+            androidVersion = "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
             soc = soc.ifBlank { "Tidak dilaporkan oleh sistem" },
             cpuDescription = readCpuDescription(),
             cpuCoresRuntime = cpuCount,
@@ -111,8 +111,8 @@ object DeviceDiagnostics {
             }
         }.distinct().sorted()
         if (frequencies.isEmpty()) return "Tidak diekspos sysfs"
-        return if (frequencies.size == 1) "\${frequencies.first()} MHz"
-        else "\${frequencies.first()}–\${frequencies.last()} MHz (maks core yang terbaca)"
+        return if (frequencies.size == 1) "${frequencies.first()} MHz"
+        else "${frequencies.first()}–${frequencies.last()} MHz (maks core yang terbaca)"
     }
 
     fun formatBytes(bytes: Long): String {
