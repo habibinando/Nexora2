@@ -18,9 +18,11 @@ checkpoint periodik sehingga **bobot terus bertambah** antar sesi.
 ## Cara build
 1. Buka folder ini di Android Studio (2026.x / Iguana+). Studio akan mengambil
    Gradle 9.8.1 + dependensi secara otomatis.
-2. Pastikan SDK Platform 37 (`android.jar`), NDK r30, CMake 3.22.1, dan Vulkan shader support terpasang. Shader `app/src/main/shaders/matmul.comp` dikompilasi Gradle menjadi `assets/shaders/matmul.comp.spv`.
-3. `./gradlew :app:assembleDebug` (atau Build > Make Project).
-4. Instal di perangkat Android 12+ (minSdk 31). Vulkan opsional pada runtime; backend CPU tetap tersedia.
+2. Pastikan SDK Platform 37 (`android.jar`), NDK r30, CMake 3.22.1, dan compiler shader Vulkan `glslc` tersedia. CI memeriksa `android.jar` dan memasang `glslc` sebelum build.
+3. Jalankan `./gradlew :app:assembleDebug` (atau Build > Make Project). Task shader membutuhkan executable `glslc` yang tersedia di `PATH`.
+4. Instal di perangkat Android 12+ (minSdk 31). Vulkan opsional saat runtime; backend CPU tetap tersedia.
+
+GitHub Actions hanya membangun dan mengunggah APK **debug**. Workflow tidak membangun APK release.
 
 ## Fitur nyata (tidak ada mock)
 | Fitur | Lokasi kode |
