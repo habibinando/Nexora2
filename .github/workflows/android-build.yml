@@ -60,19 +60,23 @@ jobs:
           set -euo pipefail
           sdkmanager --install "platforms;android-37.0" "build-tools;36.0.0" "ndk;30.0.16248370" "cmake;3.22.1"
 
-          # API 37 may be published as android-37.0 while AGP probes android-37.
+          # Keep the SDK manager's canonical package directory; do not create an
+          # android-37 alias because it triggers CXX5304 inconsistent-location warnings.
           PLATFORM_DIR="$ANDROID_HOME/platforms/android-37.0"
           test -s "$PLATFORM_DIR/android.jar" || {
             echo "::error::SDK installer completed but platforms/android-37.0/android.jar is missing."
             find "$ANDROID_HOME/platforms" -maxdepth 2 -type f -name android.jar -print || true
             exit 1
           }
-          if [ ! -e "$ANDROID_HOME/platforms/android-37" ]; then
-            ln -s "$PLATFORM_DIR" "$ANDROID_HOME/platforms/android-37"
-          fi
-          test -s "$ANDROID_HOME/platforms/android-37/android.jar"
+          test ! -L "$ANDROID_HOME/platforms/android-37"
           test -d "$ANDROID_HOME/ndk/30.0.16248370"
           test -d "$ANDROID_HOME/cmake/3.22.1"
+
+      - name: Install Vulkan shader compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes glslc
+          glslc --version
 
       - name: Build debug and release APKs
         run: bash ./gradlew --no-daemon --stacktrace :app:assembleDebug :app:assembleRelease
