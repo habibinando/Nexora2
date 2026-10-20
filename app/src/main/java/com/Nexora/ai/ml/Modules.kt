@@ -312,7 +312,7 @@ class CausalSelfAttention(val cfg: ModelConfig, rng: Random) {
         val scoreScale = 1f / sqrt(hd.toFloat())
         onProgress?.invoke("attention gradients · dV and dAttention")
         for (bh in 0 until BH) {
-            if (bh % H == 0) onProgress?.invoke("attention gradients · batch ${bh / H + 1}/$B, heads $H")
+            onProgress?.invoke("attention gradients · batch ${bh / H + 1}/$B · head ${bh % H + 1}/$H")
             val ao = bh * S * S; val qo = bh * S * hd; val ko = bh * S * hd; val vo = bh * S * hd
             // gV = At^T @ gOut ; gAt = gOut @ V^T
             for (i in 0 until S) for (e in 0 until hd) {

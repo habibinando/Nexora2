@@ -126,6 +126,16 @@ object TrainingController {
         val batchMatch = Regex("batch\\s+(\\d+)\\s*/\\s*(\\d+)", RegexOption.IGNORE_CASE).find(label)
         val batchCurrent = batchMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
         val batchTotal = batchMatch?.groupValues?.getOrNull(2)?.toIntOrNull()
+        val headMatch = Regex("head\\s+(\\d+)\\s*/\\s*(\\d+)", RegexOption.IGNORE_CASE).find(label)
+        val headCurrent = headMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
+        val headTotal = headMatch?.groupValues?.getOrNull(2)?.toIntOrNull()
+        val attentionProgress = if (
+            batchCurrent != null && batchTotal != null && headCurrent != null && headTotal != null &&
+            batchTotal > 0 && headTotal > 0
+        ) {
+            (((batchCurrent - 1).coerceAtLeast(0) * headTotal + (headCurrent - 1).coerceAtLeast(0)).toFloat() /
+                (batchTotal.toLong() * headTotal.toLong()).toFloat()).coerceIn(0f, 1f)
+        } else 0f
         val backwardSubstage = when {
             label.contains("mlp backpropagation", true) -> 0.01f
             label.contains("mlp fc2", true) && label.contains("gradien bobot", true) -> 0.05f
@@ -138,8 +148,8 @@ object TrainingController {
             label.contains("attention output projection", true) && label.contains("gradien bobot", true) -> 0.56f
             label.contains("attention output projection", true) && label.contains("gradien input", true) -> 0.60f
             label.contains("attention gradients", true) && label.contains("dv", true) -> 0.64f
-            label.contains("attention gradients", true) && batchCurrent != null && batchTotal != null && batchTotal > 0 ->
-                0.66f + 0.12f * ((batchCurrent - 1).toFloat() / batchTotal).coerceIn(0f, 1f)
+            label.contains("attention gradients", true) && headCurrent != null && headTotal != null ->
+                0.64f + 0.14f * attentionProgress
             label.contains("attention qkv projection", true) && label.endsWith("backpropagation", true) -> 0.80f
             label.contains("attention qkv projection", true) && label.contains("gradien bobot", true) -> 0.84f
             label.contains("attention qkv projection", true) && label.contains("gradien input", true) -> 0.91f
@@ -149,6 +159,7 @@ object TrainingController {
         val stageFraction = when {
             label.contains("menyiapkan batch", true) -> 0.01f
             label.contains("zero-grad", true) -> 0.03f
+            label.contains("forward", true) && (label.contains("proyeksi logits", true) || label.contains("norm akhir", true)) -> 0.40f
             label.contains("forward", true) && validLayerProgress ->
                 0.05f + 0.35f * ((currentLayer!! - 1).toFloat() / layerCount!!)
             label.contains("forward", true) -> 0.05f
