@@ -124,8 +124,11 @@ fun TrainScreen() {
     val running = state.phase == Phase.RUNNING
     val paused = state.phase == Phase.PAUSED
     val settingsEnabled = state.phase !in setOf(Phase.RUNNING, Phase.PAUSED, Phase.IMPORTING)
-    val runProgress = (state.currentEpoch - 1).coerceAtLeast(0) +
-        if (state.batchesInEpoch > 0) state.batchInEpoch.toFloat() / state.batchesInEpoch else 0f
+    val completedBatchFraction = if (state.batchInEpoch > 0 && state.batchesInEpoch > 0) {
+        (state.batchInEpoch - 1).coerceAtLeast(0).toFloat() + state.batchProgress.coerceIn(0f, 1f)
+    } else 0f
+    val runProgress = (state.currentEpoch - 1).coerceAtLeast(0).toFloat() +
+        if (state.batchesInEpoch > 0) completedBatchFraction / state.batchesInEpoch else 0f
     val targetReached = state.epoch >= hp.epochs && state.numTokens > 0
     val progress = if (targetReached) 1f else (runProgress / hp.epochs.coerceAtLeast(1)).coerceIn(0f, 1f)
     val progressPercent = (progress * 100).toInt()
@@ -214,9 +217,19 @@ fun TrainScreen() {
             )
             if (running || paused) {
                 Text(
-                    "Durasi tahap: ${fmtOperationMs(state.operationElapsedMs)} · optimizer step ${state.step}",
+                    "Durasi tahap: ${fmtOperationMs(state.operationElapsedMs)} · bobot diperbarui ${state.step} kali",
                     color = NexoraOnSurface, fontSize = 12.sp, fontWeight = FontWeight.Medium
                 )
+                Text(
+                    "Kemajuan batch aktif: ${(state.batchProgress.coerceIn(0f, 1f) * 100f).toInt()}% · progress ini perkiraan tahap komputasi, bukan persentase bobot yang sudah diperbarui",
+                    color = NexoraMuted, fontSize = 11.sp
+                )
+                if (state.step == 0 && state.batchInEpoch > 0) {
+                    Text(
+                        "Belum ada update bobot yang selesai. Step pertama baru bertambah setelah backpropagation dan AdamW untuk batch ini selesai.",
+                        color = NexoraAmber, fontSize = 11.sp
+                    )
+                }
             }
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -274,7 +287,12 @@ fun TrainScreen() {
                 if (state.tokensPerSec.isFinite() && state.tokensPerSec > 0f) "%.1f tok/s".format(state.tokensPerSec) else "—",
                 "Throughput aktual", Color(0xFF10B981), Modifier.weight(1f)
             )
-            TrainingMetric("ETA", if (running || paused) fmtMs(state.etaMs) else "—", "Estimasi sisa waktu", NexoraAmber, Modifier.weight(1f))
+            TrainingMetric(
+                "ETA",
+                if (running || paused) if (state.etaMs > 0L) fmtMs(state.etaMs) else "Menghitung…" else "—",
+                if (state.etaMs > 0L) "Perkiraan dari batch selesai" else "Belum cukup data untuk estimasi",
+                NexoraAmber, Modifier.weight(1f)
+            )
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TrainingMetric(
