@@ -288,6 +288,13 @@ object TrainingController {
             // Gradient clipping
             val grads = pairs.map { it.second }
             val gNorm = MathUtil.gradNorm(*grads.toTypedArray())
+            if (!gNorm.isFinite() || gNorm < 0f) {
+                _state.value = _state.value.copy(
+                    phase = Phase.ERROR,
+                    message = "Gradien tidak finite; optimizer tidak dijalankan agar bobot tidak rusak."
+                )
+                return
+            }
             if (gNorm > hp.gradClip) {
                 val sc = hp.gradClip / gNorm
                 for (g in grads) MathUtil.scale(g, sc)
