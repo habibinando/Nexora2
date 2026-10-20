@@ -87,24 +87,37 @@ object NativeOps {
         val n = 13
         val a = FloatArray(m * k) { ((it % 13) - 6) * 0.125f }
         val b = FloatArray(k * n) { ((it % 9) - 4) * 0.2f }
-        val expected = FloatArray(m * n)
-        val actual = FloatArray(m * n)
+        val aTransposed = transposeRowMajor(a, m, k)
+        val bTransposed = transposeRowMajor(b, k, n)
 
-        val passed = try {
-            // CPU reference uses the same row-major matrix contract as the shader.
-            jniMatMul(a, b, expected, m, k, n, false, false, 1f, 0f)
-            val executed = nativeGpuMatMul(a, b, actual, m, k, n)
-            if (!executed) {
-                false
-            } else {
-                var maxError = 0f
-                var maxReference = 0f
-                for (i in expected.indices) {
-                    maxError = maxOf(maxError, abs(expected[i] - actual[i]))
-                    maxReference = maxOf(maxReference, abs(expected[i]))
-                }
-                maxError <= 1e-3f * maxOf(1f, maxReference)
+        fun casePasses(transA: Boolean, transB: Boolean): Boolean {
+            val inputA = if (transA) aTransposed else a
+            val inputB = if (transB) bTransposed else b
+            val gpuA = if (transA) transposeRowMajor(inputA, k, m) else inputA
+            val gpuB = if (transB) transposeRowMajor(inputB, n, k) else inputB
+            val expected = FloatArray(m * n)
+            val actual = FloatArray(m * n)
+
+            // CPU reference uses the same transposition contract as the training code.
+            jniMatMul(inputA, inputB, expected, m, k, n, transA, transB, 1f, 0f)
+            if (!nativeGpuMatMul(gpuA, gpuB, actual, m, k, n)) return false
+
+            var maxError = 0f
+            var maxReference = 0f
+            for (i in expected.indices) {
+                maxError = maxOf(maxError, abs(expected[i] - actual[i]))
+                maxReference = maxOf(maxReference, abs(expected[i]))
             }
+            return maxError <= 1e-3f * maxOf(1f, maxReference)
+        }
+
+        // Include edge tiles and every transA/transB combination, since the training
+        // code uses transposed matrices during backward propagation and weight updates.
+        val passed = try {
+            casePasses(false, false) &&
+                casePasses(true, false) &&
+                casePasses(false, true) &&
+                casePasses(true, true)
         } catch (_: Exception) {
             false
         }
