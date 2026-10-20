@@ -77,7 +77,7 @@ fun LabScreen() {
         GradientLabel("Lab • Benchmark & Setelan")
         SectionTitle("Benchmark CPU/GPU")
         Text(
-            "Tes CPU 512×512 dan GPU 512×512 dijalankan terpisah. Mini-training mengukur panggilan GEMM CPU/GPU yang benar-benar terjadi. Benchmark memakai CPU intensif; jangan jalankan bersamaan dengan training.",
+            "Tes CPU 512×512 dan Vulkan compute 512×512 dijalankan terpisah. Mini-training menghitung GEMM CPU/Vulkan yang benar-benar sukses setelah uji akurasi. Benchmark membebani perangkat; jangan jalankan bersamaan dengan training.",
             color = NexoraMuted, fontSize = 12.sp
         )
         Button(
@@ -125,7 +125,7 @@ fun LabScreen() {
                 KeyValueRow("Android", r.androidVersion)
                 KeyValueRow("CPU thread tersedia", "${r.cpuCores}")
                 KeyValueRow("CPU GEMM 512×512", "%.2f GFLOPS · %.2f ms".format(r.cpuGflops, r.cpuMsPerMatMul))
-                KeyValueRow("GPU tersedia", if (r.gpuAvailable) "Ya — GLES compute aktif" else "Tidak — GEMM besar fallback CPU")
+                KeyValueRow("GPU tersedia", if (r.gpuAvailable) "Ya — Vulkan compute aktif" else "Tidak — GEMM besar fallback CPU")
                 KeyValueRow("GPU GEMM 512×512", if (r.gpuMsPerMatMul > 0) "%.2f GFLOPS · %.2f ms".format(r.gpuGflops, r.gpuMsPerMatMul) else "Tidak dijalankan")
                 KeyValueRow("Mini-training step", "%.2f ms · %.1f token/detik".format(r.stepMsPerStep, r.tokensPerSec))
                 KeyValueRow("Loss mini-training", "%.5f".format(r.stepLoss))
@@ -137,7 +137,7 @@ fun LabScreen() {
                 KeyValueRow("RAM total / tersedia", "${r.ramTotalMb} MB / ${r.ramAvailMb} MB")
             }
         }
-        Text("Info backend GPU: $gpuInfo", color = NexoraMuted, fontSize = 11.sp)
+        Text("Info backend Vulkan: $gpuInfo", color = NexoraMuted, fontSize = 11.sp)
 
         SectionTitle("Arsitektur model")
         Text(
