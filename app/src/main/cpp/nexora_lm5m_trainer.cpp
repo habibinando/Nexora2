@@ -344,7 +344,6 @@ TrainStepResult executeLM5MTrainStep(
         }
     }
 
-    std::vector<float> dSwiglu(DFF);
     std::vector<float> dGate(DFF);
     std::vector<float> dUp(DFF);
     std::vector<float> dHFfn(D);
@@ -360,13 +359,13 @@ TrainStepResult executeLM5MTrainStep(
         const auto& lw = layers[l];
         const auto& lc = caches[l];
 
-        // 1. SwiGLU FFN backward
+        // 1. SwiGLU FFN backward. W2 is [D,DFF], so dSwiglu = dXCurrent * W2.
+        // Batch tokens to avoid per-token dispatch and queue-idle synchronization.
+        std::vector<float> dSwigluAll(static_cast<size_t>(seqLen) * DFF);
+        vkEngine.matmul(dXCurrent.data(), lw.w2, dSwigluAll.data(), seqLen, D, DFF, 0, useVulkan);
         for (uint32_t t = 0; t < seqLen; ++t) {
             std::memcpy(&dXMid[t * D], &dXCurrent[t * D], D * sizeof(float));
-
-            // Down projection backward:
-            // dSwiglu = dXCurrent * w2^T
-            vkEngine.matmul(&dXCurrent[t * D], lw.w2, dSwiglu.data(), 1, D, DFF, 0, useVulkan);
+            const float* dSwigluRow = dSwigluAll.data() + static_cast<size_t>(t) * DFF;
 
             // gradW2 += dXCurrent^T * swiglu
             for (uint32_t i = 0; i < D; ++i) {
@@ -385,7 +384,7 @@ TrainStepResult executeLM5MTrainStep(
                 float z = lc.gate[t * DFF + j];
                 float sig = 1.0f / (1.0f + std::exp(-z));
                 float siluVal = z * sig;
-                float ds = dSwiglu[j];
+                float ds = dSwigluRow[j];
 
                 dUp[j] = ds * siluVal;
                 float dsiluVal = ds * lc.up[t * DFF + j];
@@ -425,12 +424,10 @@ TrainStepResult executeLM5MTrainStep(
             }
         }
 
-        // 2. Attention backward
+        // 2. Attention backward. W_o is [out,in], so dOutHeads = dXMid * W_o.
+        vkEngine.matmul(dXMid.data(), lw.wo, dOutHeads.data(), seqLen, D, D, 0, useVulkan);
         for (uint32_t t = 0; t < seqLen; ++t) {
             std::memcpy(&dXPrev[t * D], &dXMid[t * D], D * sizeof(float));
-
-            // wo projection backward:
-            vkEngine.matmul(&dXMid[t * D], lw.wo, &dOutHeads[t * D], 1, D, D, 0, useVulkan);
 
             // gradWo += dXMid^T * outHeads
             for (uint32_t i = 0; i < D; ++i) {
