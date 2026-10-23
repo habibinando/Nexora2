@@ -65,6 +65,12 @@ TrainStepResult executeLM5MTrainStep(
     if (seqLen < 2 || !tokens || !allWeights || !allGrads || !allM || !allV) {
         return result;
     }
+    for (uint32_t t = 0; t < seqLen; ++t) {
+        if (tokens[t] < 0 || tokens[t] >= static_cast<int32_t>(LM5MOffsets::VOCAB_SIZE)) {
+            LOGD("Invalid token id at position %u; aborting training step before modifying weights.", t);
+            return result;
+        }
+    }
 
     ensureRopeInit();
     auto& vkEngine = VulkanComputeEngine::instance();
@@ -285,11 +291,6 @@ TrainStepResult executeLM5MTrainStep(
     for (uint32_t t = 0; t < numTargets; ++t) {
         float* rowLogits = logits.data() + static_cast<size_t>(t) * LM5MOffsets::VOCAB_SIZE;
         int32_t target = tokens[t + 1];
-        if (target < 0 || target >= static_cast<int32_t>(LM5MOffsets::VOCAB_SIZE)) {
-            LOGD("Invalid target token id at position %u; skipping invalid training step.", t + 1);
-            return result;
-        }
-
         float maxL = -1e30f;
         for (uint32_t v = 0; v < LM5MOffsets::VOCAB_SIZE; ++v) {
             if (rowLogits[v] > maxL) maxL = rowLogits[v];
