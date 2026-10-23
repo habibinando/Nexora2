@@ -39,7 +39,7 @@ public:
 
     // AdamW Decoupled parameter update
     bool adamWUpdate(float* param, float* grad, float* m, float* v, uint32_t count,
-                     float beta1, float beta2, float alphaT, float eps,
+                     float beta1, float beta2, float alphaT, float eps, float learningRate,
                      float weightDecay, float clipScale, bool is2D, bool useGpu = true);
 
 private:
