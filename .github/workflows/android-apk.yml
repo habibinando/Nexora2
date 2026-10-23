@@ -9,6 +9,9 @@ on:
       - '**.kts'
       - '**.cpp'
       - '**.h'
+      - '**.comp'
+      - '**.py'
+      - '**/CMakeLists.txt'
       - '**.xml'
       - 'gradle/**'
       - 'gradle.properties'
@@ -41,6 +44,12 @@ jobs:
         with:
           gradle-version: '9.8.1'
           cache-read-only: false
+
+      - name: Install SPIR-V shader compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y glslang-tools python3
+          glslangValidator --version
 
       - name: Accept Android SDK licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
