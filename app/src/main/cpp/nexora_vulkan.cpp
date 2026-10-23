@@ -372,11 +372,66 @@ bool VulkanComputeEngine::init() {
         vkCreateComputePipelines(m_impl->device, VK_NULL_HANDLE, 1, &pipeInfo, nullptr, &m_impl->pipeSwiglu);
     }
 
-    // (d) Create shared mapped memory buffers for zero-copy UMA GPU compute
+    // (d) SwiGLU backward (5 storage buffers; count push constant)
+    m_impl->shSwigluBack = m_impl->createShaderModule(spv_swiglu_backward, spv_swiglu_backward_size);
+    if (m_impl->shSwigluBack != VK_NULL_HANDLE) {
+        VkDescriptorSetLayoutBinding bindings[5] = {
+            { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+            { 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+            { 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+            { 3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+            { 4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr }
+        };
+        VkDescriptorSetLayoutCreateInfo dslInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 5, bindings };
+        if (vkCreateDescriptorSetLayout(m_impl->device, &dslInfo, nullptr, &m_impl->dslSwigluBack) == VK_SUCCESS) {
+            VkPushConstantRange pcr{ VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t) };
+            VkPipelineLayoutCreateInfo plInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 1, &m_impl->dslSwigluBack, 1, &pcr };
+            if (vkCreatePipelineLayout(m_impl->device, &plInfo, nullptr, &m_impl->plSwigluBack) == VK_SUCCESS) {
+                VkComputePipelineCreateInfo pipeInfo{};
+                pipeInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+                pipeInfo.layout = m_impl->plSwigluBack;
+                pipeInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                pipeInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+                pipeInfo.stage.module = m_impl->shSwigluBack;
+                pipeInfo.stage.pName = "main";
+                vkCreateComputePipelines(m_impl->device, VK_NULL_HANDLE, 1, &pipeInfo, nullptr, &m_impl->pipeSwigluBack);
+            }
+        }
+    }
+
+    // (e) RMSNorm (x, weights, output, inverse standard deviation)
+    m_impl->shRmsNorm = m_impl->createShaderModule(spv_rmsnorm, spv_rmsnorm_size);
+    if (m_impl->shRmsNorm != VK_NULL_HANDLE) {
+        VkDescriptorSetLayoutBinding bindings[4] = {
+            { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+            { 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+            { 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+            { 3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr }
+        };
+        VkDescriptorSetLayoutCreateInfo dslInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 4, bindings };
+        if (vkCreateDescriptorSetLayout(m_impl->device, &dslInfo, nullptr, &m_impl->dslRmsNorm) == VK_SUCCESS) {
+            struct RmsPushLayout { uint32_t D; float eps; uint32_t totalTokens; };
+            VkPushConstantRange pcr{ VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RmsPushLayout) };
+            VkPipelineLayoutCreateInfo plInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 1, &m_impl->dslRmsNorm, 1, &pcr };
+            if (vkCreatePipelineLayout(m_impl->device, &plInfo, nullptr, &m_impl->plRmsNorm) == VK_SUCCESS) {
+                VkComputePipelineCreateInfo pipeInfo{};
+                pipeInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+                pipeInfo.layout = m_impl->plRmsNorm;
+                pipeInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                pipeInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+                pipeInfo.stage.module = m_impl->shRmsNorm;
+                pipeInfo.stage.pName = "main";
+                vkCreateComputePipelines(m_impl->device, VK_NULL_HANDLE, 1, &pipeInfo, nullptr, &m_impl->pipeRmsNorm);
+            }
+        }
+    }
+
+    // (f) Create shared mapped memory buffers used by all compute pipelines.
     m_impl->createGpuBuffer(Impl::MAX_BUF_SIZE, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, m_impl->bufA, m_impl->memA, &m_impl->mapA);
     m_impl->createGpuBuffer(Impl::MAX_BUF_SIZE, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, m_impl->bufB, m_impl->memB, &m_impl->mapB);
     m_impl->createGpuBuffer(Impl::MAX_BUF_SIZE, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, m_impl->bufC, m_impl->memC, &m_impl->mapC);
     m_impl->createGpuBuffer(Impl::MAX_BUF_SIZE, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, m_impl->bufD, m_impl->memD, &m_impl->mapD);
+    m_impl->createGpuBuffer(Impl::MAX_BUF_SIZE, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, m_impl->bufE, m_impl->memE, &m_impl->mapE);
 
     m_info.available = (m_impl->pipeMatmul != VK_NULL_HANDLE);
     LOGD("Vulkan Engine Initialized. Device: %s, Available: %d", m_info.deviceName.c_str(), m_info.available);
