@@ -27,7 +27,7 @@ object NexoraNative {
             try {
                 getNdkVersion()
             } catch (e: Throwable) {
-                "NDK r30 Active (C++20 SIMD)"
+                "NDK loaded; native status unavailable"
             }
         } else {
             "JVM Math Fallback (NDK Not Loaded)"
@@ -129,7 +129,7 @@ object NexoraNative {
 
     external fun nativeBpeRegisterWord(word: String): Int
 
-    // Vulkan 1.1 / 1.2+ GPU Acceleration Methods
+    // Runtime Vulkan compute status and training-step bridge.
     external fun nativeVulkanInit(): Boolean
     external fun nativeVulkanGetStatus(): String
     external fun nativeVulkanIsActive(): Boolean
