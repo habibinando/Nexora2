@@ -22,10 +22,11 @@ public:
     void cleanup();
     bool isAvailable() const { return m_info.available; }
     const VulkanDeviceInfo& getDeviceInfo() const { return m_info; }
+    uint64_t gpuDispatchCount() const { return m_gpuDispatchCount; }
     std::string getStatusString() const;
 
     // Matmul: mode 0: C = A * B, mode 1: C = A * B^T, mode 2: C = A^T * B
-    bool matmul(const float* A, const float* B, float* C, uint32_t M, uint32_t K, uint32_t N, uint32_t mode = 0);
+    bool matmul(const float* A, const float* B, float* C, uint32_t M, uint32_t K, uint32_t N, uint32_t mode = 0, bool useGpu = true);
 
     // SwiGLU activation: swiglu = (gate * sigmoid(gate)) * up
     bool swiglu(const float* gate, const float* up, float* swigluOut, uint32_t count);
@@ -39,13 +40,14 @@ public:
     // AdamW Decoupled parameter update
     bool adamWUpdate(float* param, float* grad, float* m, float* v, uint32_t count,
                      float beta1, float beta2, float alphaT, float eps,
-                     float weightDecay, float clipScale, bool is2D);
+                     float weightDecay, float clipScale, bool is2D, bool useGpu = true);
 
 private:
     VulkanComputeEngine();
     ~VulkanComputeEngine();
 
     VulkanDeviceInfo m_info;
+    uint64_t m_gpuDispatchCount = 0;
     void* m_vulkanLib = nullptr;
 
     // Internal state pointer (VkInstance, VkDevice, VkQueue, Pipelines, Buffers, etc.)

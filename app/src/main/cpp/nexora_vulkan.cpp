@@ -391,8 +391,8 @@ std::string VulkanComputeEngine::getStatusString() const {
     return ss.str();
 }
 
-bool VulkanComputeEngine::matmul(const float* A, const float* B, float* C, uint32_t M, uint32_t K, uint32_t N, uint32_t mode) {
-    if (!m_info.available || !m_impl->pipeMatmul || !m_impl->mapA || !m_impl->mapB || !m_impl->mapC) {
+bool VulkanComputeEngine::matmul(const float* A, const float* B, float* C, uint32_t M, uint32_t K, uint32_t N, uint32_t mode, bool useGpu) {
+    if (!useGpu || !m_info.available || !m_impl->pipeMatmul || !m_impl->mapA || !m_impl->mapB || !m_impl->mapC) {
         // Fallback fast C++20 SIMD matrix multiplication
         if (mode == 0) { // C = A * B
             for (uint32_t m = 0; m < M; ++m) {
@@ -495,6 +495,7 @@ bool VulkanComputeEngine::matmul(const float* A, const float* B, float* C, uint3
     // Copy result back
     std::memcpy(C, m_impl->mapC, sizeC);
     vkFreeDescriptorSets(m_impl->device, m_impl->descPool, 1, &descSet);
+    ++m_gpuDispatchCount;
     return true;
 }
 
@@ -546,24 +547,81 @@ bool VulkanComputeEngine::rmsNorm(const float* x, const float* w, float* outNorm
 
 bool VulkanComputeEngine::adamWUpdate(float* param, float* grad, float* m, float* v, uint32_t count,
                                      float beta1, float beta2, float alphaT, float eps,
-                                     float weightDecay, float clipScale, bool is2D) {
-    float decayFactor = (is2D && weightDecay > 0.0f) ? (1.0f - alphaT * weightDecay) : 1.0f;
-
-    #pragma clang loop vectorize(enable)
-    for (uint32_t i = 0; i < count; ++i) {
-        if (is2D && weightDecay > 0.0f) {
-            param[i] *= decayFactor;
+                                     float weightDecay, float clipScale, bool is2D, bool useGpu) {
+    const size_t bytes = static_cast<size_t>(count) * sizeof(float);
+    auto cpu = [&]() -> bool {
+        const float decayFactor = (is2D && weightDecay > 0.0f) ? (1.0f - alphaT * weightDecay) : 1.0f;
+        #pragma clang loop vectorize(enable)
+        for (uint32_t i = 0; i < count; ++i) {
+            if (is2D && weightDecay > 0.0f) param[i] *= decayFactor;
+            const float g = grad[i] * clipScale;
+            const float mVal = beta1 * m[i] + (1.0f - beta1) * g;
+            const float vVal = beta2 * v[i] + (1.0f - beta2) * (g * g);
+            m[i] = mVal;
+            v[i] = vVal;
+            param[i] -= alphaT * mVal / (std::sqrt(vVal) + eps);
+            grad[i] = 0.0f;
         }
-        float g = grad[i] * clipScale;
-        float mVal = beta1 * m[i] + (1.0f - beta1) * g;
-        float vVal = beta2 * v[i] + (1.0f - beta2) * (g * g);
+        return true;
+    };
+    if (count == 0) return true;
+    if (!useGpu || !m_info.available || !m_impl->pipeAdamW || bytes > Impl::MAX_BUF_SIZE ||
+        !m_impl->mapA || !m_impl->mapB || !m_impl->mapC || !m_impl->mapD) return cpu();
 
-        m[i] = mVal;
-        v[i] = vVal;
-
-        param[i] -= alphaT * mVal / (std::sqrt(vVal) + eps);
-        grad[i] = 0.0f; // Reset gradien
+    std::memcpy(m_impl->mapA, param, bytes);
+    std::memcpy(m_impl->mapB, grad, bytes);
+    std::memcpy(m_impl->mapC, m, bytes);
+    std::memcpy(m_impl->mapD, v, bytes);
+    VkDescriptorSetAllocateInfo allocInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, m_impl->descPool, 1, &m_impl->dslAdamW };
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (vkAllocateDescriptorSets(m_impl->device, &allocInfo, &set) != VK_SUCCESS) return cpu();
+    VkDescriptorBufferInfo infos[4] = {
+        {m_impl->bufA,0,bytes}, {m_impl->bufB,0,bytes},
+        {m_impl->bufC,0,bytes}, {m_impl->bufD,0,bytes}
+    };
+    VkWriteDescriptorSet writes[4]{};
+    for (uint32_t i = 0; i < 4; ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = set;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[i].pBufferInfo = &infos[i];
     }
+    vkUpdateDescriptorSets(m_impl->device, 4, writes, 0, nullptr);
+    struct AdamPush {
+        uint32_t count;
+        float beta1;
+        float beta2;
+        float alphaT;
+        float eps;
+        float weightDecay;
+        float clipScale;
+        uint32_t is2D;
+    };
+    const AdamPush push{count, beta1, beta2, alphaT, eps, weightDecay, clipScale, is2D ? 1u : 0u};
+    bool ok = vkResetCommandBuffer(m_impl->cmdBuffer, 0) == VK_SUCCESS;
+    VkCommandBufferBeginInfo beginInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, nullptr, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, nullptr };
+    if (ok) ok = vkBeginCommandBuffer(m_impl->cmdBuffer, &beginInfo) == VK_SUCCESS;
+    if (ok) {
+        vkCmdBindPipeline(m_impl->cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->pipeAdamW);
+        vkCmdBindDescriptorSets(m_impl->cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->plAdamW, 0, 1, &set, 0, nullptr);
+        vkCmdPushConstants(m_impl->cmdBuffer, m_impl->plAdamW, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+        vkCmdDispatch(m_impl->cmdBuffer, (count + 255) / 256, 1, 1);
+        ok = vkEndCommandBuffer(m_impl->cmdBuffer) == VK_SUCCESS;
+    }
+    if (ok) {
+        VkSubmitInfo submit{ VK_STRUCTURE_TYPE_SUBMIT_INFO, nullptr, 0, nullptr, nullptr, 1, &m_impl->cmdBuffer, 0, nullptr };
+        ok = vkQueueSubmit(m_impl->computeQueue, 1, &submit, VK_NULL_HANDLE) == VK_SUCCESS;
+        if (ok) ok = vkQueueWaitIdle(m_impl->computeQueue) == VK_SUCCESS;
+    }
+    vkFreeDescriptorSets(m_impl->device, m_impl->descPool, 1, &set);
+    if (!ok) return cpu();
+    std::memcpy(param, m_impl->mapA, bytes);
+    std::memcpy(grad, m_impl->mapB, bytes);
+    std::memcpy(m, m_impl->mapC, bytes);
+    std::memcpy(v, m_impl->mapD, bytes);
+    ++m_gpuDispatchCount;
     return true;
 }
 

@@ -68,8 +68,8 @@ TrainStepResult executeLM5MTrainStep(
 
     ensureRopeInit();
     auto& vkEngine = VulkanComputeEngine::instance();
-    bool useVulkan = preferVulkan && vkEngine.isAvailable();
-    result.vulkanUsed = useVulkan;
+    const uint64_t gpuDispatchesAtStart = vkEngine.gpuDispatchCount();
+    const bool useVulkan = preferVulkan && vkEngine.isAvailable();
 
     const uint32_t D = LM5MOffsets::D_MODEL; // 256
     const uint32_t DFF = LM5MOffsets::D_FF;   // 704
@@ -185,9 +185,9 @@ TrainStepResult executeLM5MTrainStep(
             lc.invStdAttn[t] = applyRmsNorm(&currentX[t * D], lw.attnNorm, &lc.hAttn[t * D], D);
 
             // Q = h * wq, K = h * wk, V = h * wv
-            vkEngine.matmul(&lc.hAttn[t * D], lw.wq, &lc.q[t * D], 1, D, D, 0);
-            vkEngine.matmul(&lc.hAttn[t * D], lw.wk, &lc.k[t * D], 1, D, D, 0);
-            vkEngine.matmul(&lc.hAttn[t * D], lw.wv, &lc.v[t * D], 1, D, D, 0);
+            vkEngine.matmul(&lc.hAttn[t * D], lw.wq, &lc.q[t * D], 1, D, D, 0, useVulkan);
+            vkEngine.matmul(&lc.hAttn[t * D], lw.wk, &lc.k[t * D], 1, D, D, 0, useVulkan);
+            vkEngine.matmul(&lc.hAttn[t * D], lw.wv, &lc.v[t * D], 1, D, D, 0, useVulkan);
 
             for (uint32_t h = 0; h < H; ++h) {
                 applyRope(&lc.q[t * D], h * HD, t);
@@ -235,7 +235,7 @@ TrainStepResult executeLM5MTrainStep(
 
         // Wo projection + Residual -> xMid
         for (uint32_t t = 0; t < seqLen; ++t) {
-            vkEngine.matmul(&lc.outHeads[t * D], lw.wo, hTemp.data(), 1, D, D, 0);
+            vkEngine.matmul(&lc.outHeads[t * D], lw.wo, hTemp.data(), 1, D, D, 0, useVulkan);
             #pragma clang loop vectorize(enable)
             for (uint32_t i = 0; i < D; ++i) {
                 lc.xMid[t * D + i] = currentX[t * D + i] + hTemp[i];
@@ -246,8 +246,8 @@ TrainStepResult executeLM5MTrainStep(
         for (uint32_t t = 0; t < seqLen; ++t) {
             lc.invStdFfn[t] = applyRmsNorm(&lc.xMid[t * D], lw.ffnNorm, &lc.hFfn[t * D], D);
 
-            vkEngine.matmul(&lc.hFfn[t * D], lw.w1, &lc.gate[t * DFF], 1, D, DFF, 0);
-            vkEngine.matmul(&lc.hFfn[t * D], lw.w3, &lc.up[t * DFF], 1, D, DFF, 0);
+            vkEngine.matmul(&lc.hFfn[t * D], lw.w1, &lc.gate[t * DFF], 1, D, DFF, 0, useVulkan);
+            vkEngine.matmul(&lc.hFfn[t * D], lw.w3, &lc.up[t * DFF], 1, D, DFF, 0, useVulkan);
 
             #pragma clang loop vectorize(enable)
             for (uint32_t j = 0; j < DFF; ++j) {
@@ -257,7 +257,7 @@ TrainStepResult executeLM5MTrainStep(
                 lc.swiglu[t * DFF + j] = sVal * lc.up[t * DFF + j];
             }
 
-            vkEngine.matmul(&lc.swiglu[t * DFF], lw.w2, downTemp.data(), 1, DFF, D, 0);
+            vkEngine.matmul(&lc.swiglu[t * DFF], lw.w2, downTemp.data(), 1, DFF, D, 0, useVulkan);
             #pragma clang loop vectorize(enable)
             for (uint32_t i = 0; i < D; ++i) {
                 lc.xOut[t * D + i] = lc.xMid[t * D + i] + downTemp[i];
@@ -283,7 +283,7 @@ TrainStepResult executeLM5MTrainStep(
 
     for (uint32_t t = 0; t < numTargets; ++t) {
         // Logits = xFinal[t] * tokEmb^T
-        vkEngine.matmul(&xFinal[t * D], tokEmb, logits.data(), 1, D, LM5MOffsets::VOCAB_SIZE, 1);
+        vkEngine.matmul(&xFinal[t * D], tokEmb, logits.data(), 1, D, LM5MOffsets::VOCAB_SIZE, 1, useVulkan);
         int32_t target = tokens[t + 1];
 
         float maxL = -1e30f;
@@ -362,7 +362,7 @@ TrainStepResult executeLM5MTrainStep(
 
             // Down projection backward:
             // dSwiglu = dXCurrent * w2^T
-            vkEngine.matmul(&dXCurrent[t * D], lw.w2, dSwiglu.data(), 1, D, DFF, 1);
+            vkEngine.matmul(&dXCurrent[t * D], lw.w2, dSwiglu.data(), 1, D, DFF, 1, useVulkan);
 
             // gradW2 += dXCurrent^T * swiglu
             for (uint32_t i = 0; i < D; ++i) {
@@ -426,7 +426,7 @@ TrainStepResult executeLM5MTrainStep(
             std::memcpy(&dXPrev[t * D], &dXMid[t * D], D * sizeof(float));
 
             // wo projection backward:
-            vkEngine.matmul(&dXMid[t * D], lw.wo, &dOutHeads[t * D], 1, D, D, 1);
+            vkEngine.matmul(&dXMid[t * D], lw.wo, &dOutHeads[t * D], 1, D, D, 1, useVulkan);
 
             // gradWo += dXMid^T * outHeads
             for (uint32_t i = 0; i < D; ++i) {
@@ -570,7 +570,7 @@ TrainStepResult executeLM5MTrainStep(
     float alphaT = learningRate * std::sqrt(1.0f - b2Pow) / (1.0f - b1Pow);
 
     auto updateAdam = [&](float* param, float* grad, float* m, float* v, uint32_t count, bool is2D) {
-        vkEngine.adamWUpdate(param, grad, m, v, count, b1, b2, alphaT, eps, weightDecay, clipScale, is2D);
+        vkEngine.adamWUpdate(param, grad, m, v, count, b1, b2, alphaT, eps, weightDecay, clipScale, is2D, useVulkan);
     };
 
     // tokEmb [4096, 256]: 2D weight matrix -> weight decay active

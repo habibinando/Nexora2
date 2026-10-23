@@ -11,6 +11,9 @@ on:
       - '**.h'
       - '**.xml'
       - 'gradle/**'
+      - 'gradle.properties'
+      - 'gradlew*'
+      - '.java-version'
       - '.github/workflows/android-apk.yml'
 
 permissions:

@@ -24,7 +24,7 @@ android {
 
     externalNativeBuild {
       cmake {
-        cppFlags("-O3", "-ffast-math")
+        cppFlags("-O3", "-std=c++20")
       }
     }
   }
@@ -70,8 +70,8 @@ android {
     }
   }
   compileOptions {
-    sourceCompatibility = JavaVersion.VERSION_11
-    targetCompatibility = JavaVersion.VERSION_11
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
   }
   buildFeatures {
     compose = true
