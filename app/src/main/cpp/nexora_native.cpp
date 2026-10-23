@@ -542,10 +542,23 @@ Java_com_nexora_model_NexoraNative_nativeTrainStepLM5M(
         return res;
     }
 
+    // The native trainer contains fixed offsets for exactly LM5M (5,065,472 floats).
+    // Reject incompatible arrays before pointer acquisition to avoid out-of-bounds writes.
+    constexpr jsize EXPECTED_PARAMS = static_cast<jsize>(nexora::LM5MOffsets::TOTAL_PARAMS);
+    const jsize wLen = env->GetArrayLength(allWeightsArr);
+    const jsize gLen = env->GetArrayLength(allGradsArr);
+    const jsize mLen = env->GetArrayLength(allMArr);
+    const jsize vLen = env->GetArrayLength(allVArr);
+    if (wLen != EXPECTED_PARAMS || gLen != EXPECTED_PARAMS ||
+        mLen != EXPECTED_PARAMS || vLen != EXPECTED_PARAMS) {
+        LOGD("Native LM5M rejected incompatible arrays: expected %d; weights=%d grads=%d m=%d v=%d",
+             EXPECTED_PARAMS, wLen, gLen, mLen, vLen);
+        return env->NewFloatArray(4); // stepCompleted remains 0
+    }
+
     jsize seqLen = env->GetArrayLength(tokensArr);
     if (seqLen < 2) {
-        jfloatArray res = env->NewFloatArray(3);
-        return res;
+        return env->NewFloatArray(4); // consistent JNI result layout
     }
 
     jint *tokens = static_cast<jint*>(env->GetPrimitiveArrayCritical(tokensArr, nullptr));
