@@ -30,6 +30,7 @@ struct TrainStepResult {
     float loss = 0.0f;
     float gradNorm = 0.0f;
     bool vulkanUsed = false;
+    bool completed = false;
 };
 
 TrainStepResult executeLM5MTrainStep(
