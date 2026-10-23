@@ -767,7 +767,7 @@ bool VulkanComputeEngine::rmsNorm(const float* x, const float* w, float* outNorm
 }
 
 bool VulkanComputeEngine::adamWUpdate(float* param, float* grad, float* m, float* v, uint32_t count,
-                                     float beta1, float beta2, float alphaT, float eps, float learningRate,
+                                     float beta1, float beta2, float alphaT, float epsCorrected, float learningRate,
                                      float weightDecay, float clipScale, bool is2D, bool useGpu) {
     const size_t bytes = static_cast<size_t>(count) * sizeof(float);
     auto cpu = [&]() -> bool {
@@ -780,7 +780,7 @@ bool VulkanComputeEngine::adamWUpdate(float* param, float* grad, float* m, float
             const float vVal = beta2 * v[i] + (1.0f - beta2) * (g * g);
             m[i] = mVal;
             v[i] = vVal;
-            param[i] -= alphaT * mVal / (std::sqrt(vVal) + eps);
+            param[i] -= alphaT * mVal / (std::sqrt(vVal) + epsCorrected);
             grad[i] = 0.0f;
         }
         return true;
