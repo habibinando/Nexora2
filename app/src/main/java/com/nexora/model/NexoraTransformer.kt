@@ -31,6 +31,7 @@ class NexoraTransformer(
 ) {
     var trainingMode: TrainingMode = TrainingMode.FULL_PARAMETERS
     val adamStepCount = AtomicLong(config.stepsTrained.toLong())
+    private var activeOptimizerType: OptimizerType = OptimizerType.ADAMW
 
     // 1. Matriks Token Embeddings [4096, 256] = 1,048,576
     val tokEmb = FloatArray(config.vocabSize * config.dModel)
@@ -256,6 +257,24 @@ class NexoraTransformer(
         }
         syncWeightsToFlat()
         syncMomentsToFlat()
+    }
+
+    private fun resetOptimizerState() {
+        mTokEmb.fill(0f)
+        vTokEmb.fill(0f)
+        mFinalNorm.fill(0f)
+        vFinalNorm.fill(0f)
+        allM.fill(0f)
+        allV.fill(0f)
+        for (lw in layers) {
+            arrayOf(
+                lw.mAttnNorm, lw.vAttnNorm, lw.mWq, lw.vWq, lw.mWk, lw.vWk,
+                lw.mWv, lw.vWv, lw.mWo, lw.vWo, lw.mFfnNorm, lw.vFfnNorm,
+                lw.mW1, lw.vW1, lw.mW3, lw.vW3, lw.mW2, lw.vW2,
+                lw.mLoraA_Q, lw.vLoraA_Q, lw.mLoraB_Q, lw.vLoraB_Q,
+                lw.mLoraA_V, lw.vLoraA_V, lw.mLoraB_V, lw.vLoraB_V
+            ).forEach { it.fill(0f) }
+        }
     }
 
     fun calculateTotalParameters(): Long = config.totalParams
@@ -772,10 +791,24 @@ class NexoraTransformer(
         val tLen = tokens.size
         if (tLen < 2) return Pair(0.0f, 0.0f)
 
-        // Akselerasi Native NDK / Vulkan compute GPU Compute Step
-        if (NexoraNative.isNdkLoaded) {
+        // Switching optimizer invalidates its accumulated moment semantics; reset them
+        // once at the transition rather than mixing AdamW/Lion/SGD momentum states.
+        if (optimizerType != activeOptimizerType) {
+            resetOptimizerState()
+            adamStepCount.set(0L)
+            activeOptimizerType = optimizerType
+            // The Kotlin path keeps parameter arrays authoritative. Repack them before
+            // entering the native path again after an optimizer change.
+            syncWeightsToFlat()
+            syncMomentsToFlat()
+        }
+
+        // Native Vulkan trainer currently implements AdamW only. Lion and SGD Momentum
+        // intentionally use the real Kotlin optimizer implementation below instead of
+        // silently pretending the native AdamW kernel implements them.
+        if (optimizerType == OptimizerType.ADAMW && NexoraNative.isNdkLoaded) {
             try {
-                val step = adamStepCount.incrementAndGet().toInt()
+                val step = (adamStepCount.get() + 1L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
                 val res = NexoraNative.nativeTrainStepLM5M(
                     tokens = tokens,
                     allWeights = allWeights,
@@ -788,13 +821,15 @@ class NexoraTransformer(
                     step = step,
                     preferVulkan = preferVulkan
                 )
-                val loss = res[0]
-                val gradNorm = res[1]
-                lastStepUsedVulkan = (res[2] > 0.5f)
-                syncFlatToWeights()
-                return Pair(loss, gradNorm)
+                if (res.size >= 3 && res[0].isFinite() && res[1].isFinite()) {
+                    adamStepCount.set(step.toLong())
+                    lastStepUsedVulkan = (res[2] > 0.5f)
+                    syncFlatToWeights()
+                    return Pair(res[0], res[1])
+                }
             } catch (e: Throwable) {
-                // Fallback ke loop Kotlin jika native gagal
+                // The step counter advances only after a valid native result. Use the
+                // explicit Kotlin backprop/optimizer path when native execution fails.
             }
         }
 
@@ -1208,16 +1243,17 @@ class NexoraTransformer(
         val globalNorm = sqrt(sumSqGrad).toFloat()
         val clipScale = if (globalNorm > maxGradNorm) (maxGradNorm / globalNorm) else 1.0f
 
-        // 5. DECOUPLED ADAMW OPTIMIZER STEP (b1=0.9, b2=0.95, eps=1e-8, wd=0.1 on 2D only)
-        val step = adamStepCount.incrementAndGet().toInt()
+        // 5. Apply the selected optimizer with decoupled decay on matrix parameters only.
+        val step = adamStepCount.incrementAndGet().coerceAtLeast(1L)
         val b1 = 0.9f
         val b2 = 0.95f
         val eps = 1e-8f
         val b1Pow = Math.pow(b1.toDouble(), step.toDouble()).toFloat()
         val b2Pow = Math.pow(b2.toDouble(), step.toDouble()).toFloat()
-        val alphaT = learningRate * sqrt((1.0f - b2Pow).toDouble()).toFloat() / (1.0f - b1Pow)
+        val alphaT = learningRate * sqrt((1.0f - b2Pow).coerceAtLeast(0f)) / (1.0f - b1Pow)
+        val epsCorrected = eps * sqrt((1.0f - b2Pow).coerceAtLeast(0f))
 
-        fun applyAdamW(
+        fun applyOptimizer(
             param: FloatArray,
             grad: FloatArray,
             m: FloatArray,
@@ -1226,34 +1262,62 @@ class NexoraTransformer(
         ) {
             val wd = if (is2D) weightDecay else 0.0f
             val decayFactor = 1.0f - learningRate * wd
-            val n = param.size
-
-            for (i in 0 until n) {
-                if (is2D && wd > 0.0f) {
-                    param[i] *= decayFactor
+            when (optimizerType) {
+                OptimizerType.ADAMW -> {
+                    for (i in param.indices) {
+                        if (wd > 0f) param[i] *= decayFactor
+                        val g = grad[i] * clipScale
+                        val mVal = b1 * m[i] + (1.0f - b1) * g
+                        val vVal = b2 * v[i] + (1.0f - b2) * g * g
+                        m[i] = mVal
+                        v[i] = vVal
+                        param[i] -= alphaT * mVal / (sqrt(vVal) + epsCorrected)
+                        grad[i] = 0f
+                    }
                 }
-                val g = grad[i] * clipScale
-                val mVal = b1 * m[i] + (1.0f - b1) * g
-                val vVal = b2 * v[i] + (1.0f - b2) * g * g
-                m[i] = mVal
-                v[i] = vVal
-                param[i] -= alphaT * mVal / (sqrt(vVal) + eps)
+                OptimizerType.LION -> {
+                    val beta1Lion = 0.9f
+                    val beta2Lion = 0.99f
+                    for (i in param.indices) {
+                        if (wd > 0f) param[i] *= decayFactor
+                        val g = grad[i] * clipScale
+                        val update = beta1Lion * m[i] + (1.0f - beta1Lion) * g
+                        val sign = when {
+                            update > 0f -> 1f
+                            update < 0f -> -1f
+                            else -> 0f
+                        }
+                        param[i] -= learningRate * sign
+                        m[i] = beta2Lion * m[i] + (1.0f - beta2Lion) * g
+                        grad[i] = 0f
+                    }
+                }
+                OptimizerType.SGD_MOMENTUM -> {
+                    val momentum = 0.9f
+                    for (i in param.indices) {
+                        if (wd > 0f) param[i] *= decayFactor
+                        val g = grad[i] * clipScale
+                        m[i] = momentum * m[i] + g
+                        param[i] -= learningRate * m[i]
+                        grad[i] = 0f
+                    }
+                }
             }
         }
 
-        applyAdamW(tokEmb, gradTokEmb, mTokEmb, vTokEmb, is2D = true)
-        applyAdamW(finalNorm, gradFinalNorm, mFinalNorm, vFinalNorm, is2D = false)
+        applyOptimizer(tokEmb, gradTokEmb, mTokEmb, vTokEmb, is2D = true)
+        applyOptimizer(finalNorm, gradFinalNorm, mFinalNorm, vFinalNorm, is2D = false)
 
         for (lw in layers) {
-            applyAdamW(lw.attnNorm, lw.gradAttnNorm, lw.mAttnNorm, lw.vAttnNorm, is2D = false)
-            applyAdamW(lw.wq, lw.gradWq, lw.mWq, lw.vWq, is2D = true)
-            applyAdamW(lw.wk, lw.gradWk, lw.mWk, lw.vWk, is2D = true)
-            applyAdamW(lw.wv, lw.gradWv, lw.mWv, lw.vWv, is2D = true)
-            applyAdamW(lw.wo, lw.gradWo, lw.mWo, lw.vWo, is2D = true)
-            applyAdamW(lw.ffnNorm, lw.gradFfnNorm, lw.mFfnNorm, lw.vFfnNorm, is2D = false)
-            applyAdamW(lw.w1, lw.gradW1, lw.mW1, lw.vW1, is2D = true)
-            applyAdamW(lw.w3, lw.gradW3, lw.mW3, lw.vW3, is2D = true)
-            applyAdamW(lw.w2, lw.gradW2, lw.mW2, lw.vW2, is2D = true)
+            applyOptimizer(lw.attnNorm, lw.gradAttnNorm, lw.mAttnNorm, lw.vAttnNorm, is2D = false)
+            applyOptimizer(lw.wq, lw.gradWq, lw.mWq, lw.vWq, is2D = true)
+            applyOptimizer(lw.wk, lw.gradWk, lw.mWk, lw.vWk, is2D = true)
+            applyOptimizer(lw.wv, lw.gradWv, lw.mWv, lw.vWv, is2D = true)
+            applyOptimizer(lw.wo, lw.gradWo, lw.mWo, lw.vWo, is2D = true)
+            applyOptimizer(lw.ffnNorm, lw.gradFfnNorm, lw.mFfnNorm, lw.vFfnNorm, is2D = false)
+            applyOptimizer(lw.w1, lw.gradW1, lw.mW1, lw.vW1, is2D = true)
+            applyOptimizer(lw.w3, lw.gradW3, lw.mW3, lw.vW3, is2D = true)
+            applyOptimizer(lw.w2, lw.gradW2, lw.mW2, lw.vW2, is2D = true)
         }
 
         return Pair(finalLoss, globalNorm)
