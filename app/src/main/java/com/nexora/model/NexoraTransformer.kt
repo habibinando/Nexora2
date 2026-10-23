@@ -794,6 +794,23 @@ class NexoraTransformer(
      * Menjalankan Forward Pass, Menghitung Train Loss per Batch, Menghitung Gradien Matematis Nyata via Backpropagation,
      * Melakukan Gradient Clipping (global norm 1.0), dan Melakukan Update Parameter dengan Decoupled AdamW.
      */
+    /**
+     * Native LM5M trainer has compile-time offsets for one exact architecture.
+     * Route any differently shaped model through the shape-aware Kotlin implementation.
+     */
+    private fun supportsNativeLM5M(): Boolean =
+        config.vocabSize == 4096 &&
+        config.dModel == 256 &&
+        config.dFf == 704 &&
+        config.numLayers == 5 &&
+        config.numHeads == 4 &&
+        config.headDim == 64 &&
+        config.totalParams == 5_065_472L &&
+        allWeights.size == 5_065_472 &&
+        allGrads.size == 5_065_472 &&
+        allM.size == 5_065_472 &&
+        allV.size == 5_065_472
+
     @Synchronized
     fun trainSequenceStep(
         tokens: IntArray,
@@ -823,7 +840,8 @@ class NexoraTransformer(
         // Native Vulkan trainer currently implements AdamW only. Lion and SGD Momentum
         // intentionally use the real Kotlin optimizer implementation below instead of
         // silently pretending the native AdamW kernel implements them.
-        if (optimizerType == OptimizerType.ADAMW && NexoraNative.isNdkLoaded) {
+        if (optimizerType == OptimizerType.ADAMW &&
+            NexoraNative.isNdkLoaded && supportsNativeLM5M()) {
             try {
                 val step = (adamStepCount.get() + 1L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
                 val res = NexoraNative.nativeTrainStepLM5M(
