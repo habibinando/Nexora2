@@ -520,7 +520,7 @@ Java_com_nexora_model_NexoraNative_nativeVulkanIsActive(
 /**
  * Pelatihan LM5M Sekuensial On-Device Terakselerasi Vulkan / SIMD C++:
  * Menerima buffer bobot lengkap 5.07M parameter Little-Endian, token sekuens, gradien, dan momen AdamW.
- * Mengembalikan array float berukuran 3: [loss, gradNorm, isVulkanUsed (1.0f atau 0.0f)]
+ * Mengembalikan array float berukuran 4: [loss, gradNorm, isVulkanUsed, stepCompleted].
  */
 JNIEXPORT jfloatArray JNICALL
 Java_com_nexora_model_NexoraNative_nativeTrainStepLM5M(
@@ -538,7 +538,7 @@ Java_com_nexora_model_NexoraNative_nativeTrainStepLM5M(
         jboolean preferVulkan) {
 
     if (!tokensArr || !allWeightsArr || !allGradsArr || !allMArr || !allVArr) {
-        jfloatArray res = env->NewFloatArray(3);
+        jfloatArray res = env->NewFloatArray(4);
         return res;
     }
 
@@ -578,9 +578,14 @@ Java_com_nexora_model_NexoraNative_nativeTrainStepLM5M(
     if (weights) env->ReleasePrimitiveArrayCritical(allWeightsArr, weights, 0);
     if (tokens) env->ReleasePrimitiveArrayCritical(tokensArr, tokens, JNI_ABORT);
 
-    jfloatArray resultArr = env->NewFloatArray(3);
-    jfloat outVals[3] = { stepRes.loss, stepRes.gradNorm, stepRes.vulkanUsed ? 1.0f : 0.0f };
-    env->SetFloatArrayRegion(resultArr, 0, 3, outVals);
+    jfloatArray resultArr = env->NewFloatArray(4);
+    jfloat outVals[4] = {
+        stepRes.loss,
+        stepRes.gradNorm,
+        stepRes.vulkanUsed ? 1.0f : 0.0f,
+        stepRes.completed ? 1.0f : 0.0f
+    };
+    env->SetFloatArrayRegion(resultArr, 0, 4, outVals);
     return resultArr;
 }
 
