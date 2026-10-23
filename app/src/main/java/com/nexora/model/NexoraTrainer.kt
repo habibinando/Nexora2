@@ -303,7 +303,7 @@ class NexoraTrainer(
                                 lossHistory = recentTrainLosses.toList(),
                                 valLossHistory = recentValLosses.toList(),
                                 lastCheckpoint = ckptRecorded,
-                                isVulkanActive = transformer.lastStepUsedVulkan || NexoraNative.isVulkanAvailable(),
+                                isVulkanActive = transformer.lastStepUsedVulkan,
                                 vulkanStatus = NexoraNative.getVulkanStatus(),
                                 statusMessage = "Epoch $epoch/$epochs • Step $globalStep/$totalStepsToRun$overfitWarning"
                             )
