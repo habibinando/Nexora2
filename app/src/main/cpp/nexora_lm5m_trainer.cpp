@@ -492,6 +492,10 @@ TrainStepResult executeLM5MTrainStep(
     }
     float globalNorm = std::sqrt(sumSqGrad);
     result.gradNorm = globalNorm;
+    if (!std::isfinite(result.loss) || !std::isfinite(globalNorm)) {
+        LOGD("Training step produced non-finite loss/gradient norm; optimizer update skipped.");
+        return result;
+    }
 
     float clipScale = (globalNorm > maxGradNorm) ? (maxGradNorm / globalNorm) : 1.0f;
 
@@ -532,6 +536,7 @@ TrainStepResult executeLM5MTrainStep(
 
     // Report GPU only if at least one Vulkan compute dispatch really completed.
     result.vulkanUsed = useVulkan && (vkEngine.gpuDispatchCount() > gpuDispatchesAtStart);
+    result.completed = true;
     return result;
 }
 
