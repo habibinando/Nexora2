@@ -359,86 +359,62 @@ TrainStepResult executeLM5MTrainStep(
         const auto& lw = layers[l];
         const auto& lc = caches[l];
 
-        // 1. SwiGLU FFN backward. W2 is [D,DFF], so dSwiglu = dXCurrent * W2.
-        // Batch tokens to avoid per-token dispatch and queue-idle synchronization.
+        // 1. SwiGLU FFN backward. Batch all dense gradients using the same
+        // [output,input] layout as the model's stored parameter matrices.
         std::vector<float> dSwigluAll(static_cast<size_t>(seqLen) * DFF);
+        std::vector<float> dGateAll(static_cast<size_t>(seqLen) * DFF);
+        std::vector<float> dUpAll(static_cast<size_t>(seqLen) * DFF);
         vkEngine.matmul(dXCurrent.data(), lw.w2, dSwigluAll.data(), seqLen, D, DFF, 0, useVulkan);
+
         for (uint32_t t = 0; t < seqLen; ++t) {
             std::memcpy(&dXMid[t * D], &dXCurrent[t * D], D * sizeof(float));
-            const float* dSwigluRow = dSwigluAll.data() + static_cast<size_t>(t) * DFF;
-
-            // gradW2 += dXCurrent^T * swiglu
-            for (uint32_t i = 0; i < D; ++i) {
-                float dxi = dXCurrent[t * D + i];
-                float* gw2Row = lw.gW2 + (i * DFF);
-                const float* swRow = &lc.swiglu[t * DFF];
-                #pragma clang loop vectorize(enable)
-                for (uint32_t j = 0; j < DFF; ++j) {
-                    gw2Row[j] += dxi * swRow[j];
-                }
-            }
-
-            // SwiGLU activation backward
-            #pragma clang loop vectorize(enable)
+            const size_t row = static_cast<size_t>(t) * DFF;
             for (uint32_t j = 0; j < DFF; ++j) {
-                float z = lc.gate[t * DFF + j];
-                float sig = 1.0f / (1.0f + std::exp(-z));
-                float siluVal = z * sig;
-                float ds = dSwigluRow[j];
-
-                dUp[j] = ds * siluVal;
-                float dsiluVal = ds * lc.up[t * DFF + j];
-                dGate[j] = dsiluVal * (sig + siluVal * (1.0f - sig));
-            }
-
-            // Up & Gate projections backward:
-            std::fill(dHFfn.begin(), dHFfn.end(), 0.0f);
-            for (uint32_t j = 0; j < DFF; ++j) {
-                float dg = dGate[j];
-                float du = dUp[j];
-                float* gw1Row = lw.gW1 + (j * D);
-                float* gw3Row = lw.gW3 + (j * D);
-                const float* w1Row = lw.w1 + (j * D);
-                const float* w3Row = lw.w3 + (j * D);
-                const float* hRow = &lc.hFfn[t * D];
-                #pragma clang loop vectorize(enable)
-                for (uint32_t i = 0; i < D; ++i) {
-                    gw1Row[i] += dg * hRow[i];
-                    gw3Row[i] += du * hRow[i];
-                    dHFfn[i] += dg * w1Row[i] + du * w3Row[i];
-                }
-            }
-
-            // FFN RMSNorm backward
-            float invStd = lc.invStdFfn[t];
-            const float* xRow = &lc.xMid[t * D];
-            float sumDxW = 0.0f;
-            for (uint32_t i = 0; i < D; ++i) {
-                lw.gFfnNorm[i] += dHFfn[i] * xRow[i] * invStd;
-                sumDxW += dHFfn[i] * lw.ffnNorm[i] * xRow[i];
-            }
-            float factor = sumDxW / (static_cast<float>(D) * (1.0f / (invStd * invStd)));
-            #pragma clang loop vectorize(enable)
-            for (uint32_t i = 0; i < D; ++i) {
-                dXMid[t * D + i] += (dHFfn[i] * lw.ffnNorm[i] - xRow[i] * factor) * invStd;
+                const float z = lc.gate[row + j];
+                const float sig = 1.0f / (1.0f + std::exp(-z));
+                const float siluVal = z * sig;
+                const float ds = dSwigluAll[row + j];
+                dUpAll[row + j] = ds * siluVal;
+                const float dsiluVal = ds * lc.up[row + j];
+                dGateAll[row + j] = dsiluVal * (sig + siluVal * (1.0f - sig));
             }
         }
 
-        // 2. Attention backward. W_o is [out,in], so dOutHeads = dXMid * W_o.
+        // dW2 = dX^T * swiglu; dW1 = dGate^T * hFfn; dW3 = dUp^T * hFfn.
+        vkEngine.matmul(dXCurrent.data(), lc.swiglu.data(), lw.gW2, D, seqLen, DFF, 2, useVulkan);
+        vkEngine.matmul(dGateAll.data(), lc.hFfn.data(), lw.gW1, DFF, seqLen, D, 2, useVulkan);
+        vkEngine.matmul(dUpAll.data(), lc.hFfn.data(), lw.gW3, DFF, seqLen, D, 2, useVulkan);
+
+        // dHffn = dGate * W1 + dUp * W3.
+        std::vector<float> dHGateAll(static_cast<size_t>(seqLen) * D);
+        std::vector<float> dHUpAll(static_cast<size_t>(seqLen) * D);
+        vkEngine.matmul(dGateAll.data(), lw.w1, dHGateAll.data(), seqLen, DFF, D, 0, useVulkan);
+        vkEngine.matmul(dUpAll.data(), lw.w3, dHUpAll.data(), seqLen, DFF, D, 0, useVulkan);
+
+        for (uint32_t t = 0; t < seqLen; ++t) {
+            const size_t row = static_cast<size_t>(t) * D;
+            const float* xRow = lc.xMid.data() + row;
+            const float invStd = lc.invStdFfn[t];
+            float sumDxW = 0.0f;
+            for (uint32_t i = 0; i < D; ++i) {
+                const float dH = dHGateAll[row + i] + dHUpAll[row + i];
+                lw.gFfnNorm[i] += dH * xRow[i] * invStd;
+                sumDxW += dH * lw.ffnNorm[i] * xRow[i];
+            }
+            const float factor = sumDxW / (static_cast<float>(D) * (1.0f / (invStd * invStd)));
+            #pragma clang loop vectorize(enable)
+            for (uint32_t i = 0; i < D; ++i) {
+                const float dH = dHGateAll[row + i] + dHUpAll[row + i];
+                dXMid[row + i] += (dH * lw.ffnNorm[i] - xRow[i] * factor) * invStd;
+            }
+        }
+
+        // 2. Attention backward. dOutHeads = dXMid * W_o and
+        // dW_o = dXMid^T * outHeads; both are batched dense operations.
         vkEngine.matmul(dXMid.data(), lw.wo, dOutHeads.data(), seqLen, D, D, 0, useVulkan);
+        vkEngine.matmul(dXMid.data(), lc.outHeads.data(), lw.gWo, D, seqLen, D, 2, useVulkan);
         for (uint32_t t = 0; t < seqLen; ++t) {
             std::memcpy(&dXPrev[t * D], &dXMid[t * D], D * sizeof(float));
-
-            // gradWo += dXMid^T * outHeads
-            for (uint32_t i = 0; i < D; ++i) {
-                float dxi = dXMid[t * D + i];
-                float* gwoRow = lw.gWo + (i * D);
-                const float* ohRow = &lc.outHeads[t * D];
-                #pragma clang loop vectorize(enable)
-                for (uint32_t j = 0; j < D; ++j) {
-                    gwoRow[j] += dxi * ohRow[j];
-                }
-            }
         }
 
         std::fill(dQ.begin(), dQ.end(), 0.0f);
