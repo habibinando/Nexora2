@@ -592,6 +592,8 @@ TrainStepResult executeLM5MTrainStep(
     // finalNorm (1D)
     updateAdam(finalNorm, gradFinalNorm, allM + 5065216, allV + 5065216, 256, false);
 
+    // Report GPU only if at least one Vulkan compute dispatch really completed.
+    result.vulkanUsed = useVulkan && (vkEngine.gpuDispatchCount() > gpuDispatchesAtStart);
     return result;
 }
 
