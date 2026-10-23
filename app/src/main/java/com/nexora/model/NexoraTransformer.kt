@@ -32,6 +32,8 @@ class NexoraTransformer(
     var trainingMode: TrainingMode = TrainingMode.FULL_PARAMETERS
     val adamStepCount = AtomicLong(config.stepsTrained.toLong())
     private var activeOptimizerType: OptimizerType = OptimizerType.ADAMW
+    // Native AdamW updates flattened buffers; checkpoints must copy their moments back.
+    private var lastStepUsedNativeAdamW: Boolean = false
 
     // 1. Matriks Token Embeddings [4096, 256] = 1,048,576
     val tokEmb = FloatArray(config.vocabSize * config.dModel)
@@ -274,6 +276,20 @@ class NexoraTransformer(
                 lw.mLoraA_Q, lw.vLoraA_Q, lw.mLoraB_Q, lw.vLoraB_Q,
                 lw.mLoraA_V, lw.vLoraA_V, lw.mLoraB_V, lw.vLoraB_V
             ).forEach { it.fill(0f) }
+        }
+    }
+
+    /**
+     * Bring the authoritative weight/moment representation into sync before checkpointing
+     * or cloning. Native AdamW writes flat JNI buffers; Kotlin optimizers write per-layer arrays.
+     */
+    fun syncOptimizerStateForCheckpoint() {
+        if (lastStepUsedNativeAdamW) {
+            syncFlatToWeights()
+            syncFlatToMoments()
+        } else {
+            syncWeightsToFlat()
+            syncMomentsToFlat()
         }
     }
 
@@ -788,6 +804,7 @@ class NexoraTransformer(
     ): Pair<Float, Float> {
         // Reset first: a failed native call must never inherit a previous step's Vulkan status.
         lastStepUsedVulkan = false
+        lastStepUsedNativeAdamW = false
         val tLen = tokens.size
         if (tLen < 2) return Pair(0.0f, 0.0f)
 
@@ -823,13 +840,21 @@ class NexoraTransformer(
                 )
                 if (res.size >= 3 && res[0].isFinite() && res[1].isFinite()) {
                     adamStepCount.set(step.toLong())
+                    lastStepUsedNativeAdamW = true
                     lastStepUsedVulkan = (res[2] > 0.5f)
                     syncFlatToWeights()
                     return Pair(res[0], res[1])
                 }
+                // The JNI trainer may have touched flat weights/moments before reporting
+                // an invalid result. Restore a consistent Kotlin view before CPU fallback.
+                syncFlatToWeights()
+                syncFlatToMoments()
             } catch (e: Throwable) {
-                // The step counter advances only after a valid native result. Use the
-                // explicit Kotlin backprop/optimizer path when native execution fails.
+                // Recover possible partial native writes before falling back. This avoids
+                // combining current flat weights with stale per-parameter optimizer state.
+                syncFlatToWeights()
+                syncFlatToMoments()
+                // The step counter advances only after a valid native result.
             }
         }
 
@@ -1320,10 +1345,17 @@ class NexoraTransformer(
             applyOptimizer(lw.w2, lw.gradW2, lw.mW2, lw.vW2, is2D = true)
         }
 
+        // If the native AdamW attempt failed, future native calls must not resume stale
+        // flat buffers after Kotlin has performed the real optimizer update.
+        if (optimizerType == OptimizerType.ADAMW && NexoraNative.isNdkLoaded) {
+            syncWeightsToFlat()
+            syncMomentsToFlat()
+        }
         return Pair(finalLoss, globalNorm)
     }
 
     fun cloneIsolated(): NexoraTransformer {
+        syncOptimizerStateForCheckpoint()
         val copy = NexoraTransformer(config, Random(42))
         System.arraycopy(allWeights, 0, copy.allWeights, 0, allWeights.size)
         System.arraycopy(allM, 0, copy.allM, 0, allM.size)
