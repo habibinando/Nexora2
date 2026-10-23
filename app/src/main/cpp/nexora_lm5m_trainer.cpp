@@ -179,9 +179,6 @@ TrainStepResult executeLM5MTrainStep(
 
     const float* currentX = xIn.data();
 
-    std::vector<float> hTemp(D);
-    std::vector<float> downTemp(D);
-
     for (uint32_t l = 0; l < 5; ++l) {
         auto& lc = caches[l];
         const auto& lw = layers[l];
@@ -344,10 +341,6 @@ TrainStepResult executeLM5MTrainStep(
         }
     }
 
-    std::vector<float> dGate(DFF);
-    std::vector<float> dUp(DFF);
-    std::vector<float> dHFfn(D);
-    std::vector<float> dHAttn(D);
     std::vector<float> dOutHeads(seqLen * D);
     std::vector<float> dXMid(seqLen * D);
     std::vector<float> dXPrev(seqLen * D);
