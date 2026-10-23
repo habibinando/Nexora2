@@ -1,0 +1,14 @@
+{
+ "type": "bytelevel_bpe",
+ "vocab_size_used": 4096,
+ "eos_token": "<|endoftext|>",
+ "eos_id": 0,
+ "pretokenize_regex": "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+",
+ "add_prefix_space": false,
+ "normalizer": null,
+ "files": [
+  "tokenizer.json",
+  "vocab.json",
+  "merges.txt"
+ ]
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Nexora",
+  "description": "On-Device AI Language Model Training dengan arsitektur LM5M 5.07M parameter (d=256, L=5, H=4, SwiGLU, RoPE), AdamW Decoupled, C++ SIMD, dan real-time chat.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,26 @@
+#version 450
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer GateBuf { float gate[]; };
+layout(set = 0, binding = 1) readonly buffer UpBuf { float up[]; };
+layout(set = 0, binding = 2) readonly buffer DSwigluBuf { float dSwiglu[]; };
+layout(set = 0, binding = 3) writeonly buffer DGateBuf { float dGate[]; };
+layout(set = 0, binding = 4) writeonly buffer DUpBuf { float dUp[]; };
+
+layout(push_constant) uniform SwigluBackPush {
+    uint count;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.count) return;
+
+    float z = gate[idx];
+    float sig = 1.0 / (1.0 + exp(-z));
+    float silu = z * sig;
+    float ds = dSwiglu[idx];
+
+    dUp[idx] = ds * silu;
+    float dsilu = ds * up[idx];
+    dGate[idx] = dsilu * (sig + silu * (1.0 - sig));
+}

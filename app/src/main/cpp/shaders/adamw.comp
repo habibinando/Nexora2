@@ -1,0 +1,37 @@
+#version 450
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) buffer ParamBuf { float params[]; };
+layout(set = 0, binding = 1) buffer GradBuf { float grads[]; };
+layout(set = 0, binding = 2) buffer MBuf { float m[]; };
+layout(set = 0, binding = 3) buffer VBuf { float v[]; };
+
+layout(push_constant) uniform AdamPush {
+    uint count;
+    float beta1;
+    float beta2;
+    float alphaT;
+    float eps;
+    float weightDecay;
+    float clipScale;
+    uint is2D;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.count) return;
+
+    if (pc.is2D != 0u && pc.weightDecay > 0.0) {
+        params[idx] *= (1.0 - pc.alphaT * pc.weightDecay);
+    }
+
+    float g = grads[idx] * pc.clipScale;
+    float mVal = pc.beta1 * m[idx] + (1.0 - pc.beta1) * g;
+    float vVal = pc.beta2 * v[idx] + (1.0 - pc.beta2) * (g * g);
+
+    m[idx] = mVal;
+    v[idx] = vVal;
+
+    params[idx] -= pc.alphaT * mVal / (sqrt(vVal) + pc.eps);
+    grads[idx] = 0.0;
+}

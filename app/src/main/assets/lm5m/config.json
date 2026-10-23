@@ -1,0 +1,33 @@
+{
+ "format": "lm5m-f32-v1",
+ "model": {
+  "vocab_size": 4096,
+  "d_model": 256,
+  "n_layers": 5,
+  "n_heads": 4,
+  "ffn_hidden": 704,
+  "max_seq_len": 256,
+  "rope_theta": 10000.0,
+  "norm_eps": 1e-05
+ },
+ "tokenizer": {
+  "type": "bytelevel_bpe",
+  "vocab_size_used": 4096,
+  "eos_token": "<|endoftext|>",
+  "eos_id": 0,
+  "pretokenize_regex": "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+",
+  "add_prefix_space": false,
+  "normalizer": null,
+  "files": [
+   "tokenizer.json",
+   "vocab.json",
+   "merges.txt"
+  ]
+ },
+ "param_count": 5065472,
+ "steps_trained": 747,
+ "weights": "weights.f32",
+ "layout": "manifest.json",
+ "torch_version": "2.11.0+cu130",
+ "created": "2026-10-22 08:38:36"
+}

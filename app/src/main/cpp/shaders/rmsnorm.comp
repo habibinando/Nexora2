@@ -1,0 +1,43 @@
+#version 450
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer InX { float x[]; };
+layout(set = 0, binding = 1) readonly buffer InW { float w[]; };
+layout(set = 0, binding = 2) writeonly buffer OutNorm { float outNorm[]; };
+layout(set = 0, binding = 3) writeonly buffer OutInvStd { float outInvStd[]; };
+
+layout(push_constant) uniform RmsPush {
+    uint D;
+    float eps;
+    uint totalTokens;
+} pc;
+
+shared float sdata[256];
+
+void main() {
+    uint tokenIdx = gl_WorkGroupID.x;
+    if (tokenIdx >= pc.totalTokens) return;
+
+    uint tid = gl_LocalInvocationID.x;
+    uint offset = tokenIdx * pc.D + tid;
+
+    float val = (tid < pc.D) ? x[offset] : 0.0;
+    sdata[tid] = val * val;
+    barrier();
+
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        barrier();
+    }
+
+    float invStd = 1.0 / sqrt((sdata[0] / float(pc.D)) + pc.eps);
+    if (tid == 0u) {
+        outInvStd[tokenIdx] = invStd;
+    }
+
+    if (tid < pc.D) {
+        outNorm[offset] = val * invStd * w[tid];
+    }
+}

@@ -1,0 +1,68 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer BufA { float dataA[]; };
+layout(set = 0, binding = 1) readonly buffer BufB { float dataB[]; };
+layout(set = 0, binding = 2) writeonly buffer BufC { float dataC[]; };
+
+layout(push_constant) uniform PushConsts {
+    uint M;
+    uint K;
+    uint N;
+    uint mode; // 0: standard (A: M x K, B: K x N) -> C: M x N
+               // 1: transpose B (A: M x K, B: N x K) -> C: M x N
+               // 2: transpose A (A: K x M, B: K x N) -> C: M x N
+} pc;
+
+shared float tileA[16][16];
+shared float tileB[16][16];
+
+void main() {
+    uint row = gl_GlobalInvocationID.y;
+    uint col = gl_GlobalInvocationID.x;
+    uint localRow = gl_LocalInvocationID.y;
+    uint localCol = gl_LocalInvocationID.x;
+
+    float acc = 0.0;
+    uint numTiles = (pc.K + 15u) / 16u;
+
+    for (uint t = 0u; t < numTiles; ++t) {
+        // Load tileA
+        uint aCol = t * 16u + localCol;
+        if (row < pc.M && aCol < pc.K) {
+            if (pc.mode == 2u) {
+                // Transpose A: dataA is (K x M), so A^T[row, aCol] = dataA[aCol * M + row]
+                tileA[localRow][localCol] = dataA[aCol * pc.M + row];
+            } else {
+                tileA[localRow][localCol] = dataA[row * pc.K + aCol];
+            }
+        } else {
+            tileA[localRow][localCol] = 0.0;
+        }
+
+        // Load tileB
+        uint bRow = t * 16u + localRow;
+        if (bRow < pc.K && col < pc.N) {
+            if (pc.mode == 1u) {
+                // Transpose B: dataB is (N x K), so B^T[bRow, col] = dataB[col * K + bRow]
+                tileB[localRow][localCol] = dataB[col * pc.K + bRow];
+            } else {
+                tileB[localRow][localCol] = dataB[bRow * pc.N + col];
+            }
+        } else {
+            tileB[localRow][localCol] = 0.0;
+        }
+
+        barrier();
+
+        for (uint k = 0u; k < 16u; ++k) {
+            acc += tileA[localRow][k] * tileB[k][localCol];
+        }
+
+        barrier();
+    }
+
+    if (row < pc.M && col < pc.N) {
+        dataC[row * pc.N + col] = acc;
+    }
+}
