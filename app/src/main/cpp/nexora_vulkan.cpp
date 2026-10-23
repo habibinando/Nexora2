@@ -473,28 +473,29 @@ bool VulkanComputeEngine::matmul(const float* A, const float* B, float* C, uint3
     };
     vkUpdateDescriptorSets(m_impl->device, 3, writes, 0, nullptr);
 
-    // Command Recording
+    // Command Recording: never report GPU use unless submission and completion succeed.
+    bool ok = vkResetCommandBuffer(m_impl->cmdBuffer, 0) == VK_SUCCESS;
     VkCommandBufferBeginInfo beginInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, nullptr, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, nullptr };
-    vkBeginCommandBuffer(m_impl->cmdBuffer, &beginInfo);
-    vkCmdBindPipeline(m_impl->cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->pipeMatmul);
-    vkCmdBindDescriptorSets(m_impl->cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->plMatmul, 0, 1, &descSet, 0, nullptr);
-
-    uint32_t pushConsts[4] = { M, K, N, mode };
-    vkCmdPushConstants(m_impl->cmdBuffer, m_impl->plMatmul, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConsts), pushConsts);
-
-    uint32_t groupX = (N + 15) / 16;
-    uint32_t groupY = (M + 15) / 16;
-    vkCmdDispatch(m_impl->cmdBuffer, groupX, groupY, 1);
-    vkEndCommandBuffer(m_impl->cmdBuffer);
-
-    // Submit & Wait
-    VkSubmitInfo submitInfo{ VK_STRUCTURE_TYPE_SUBMIT_INFO, nullptr, 0, nullptr, nullptr, 1, &m_impl->cmdBuffer, 0, nullptr };
-    vkQueueSubmit(m_impl->computeQueue, 1, &submitInfo, VK_NULL_HANDLE);
-    vkQueueWaitIdle(m_impl->computeQueue);
-
-    // Copy result back
-    std::memcpy(C, m_impl->mapC, sizeC);
+    if (ok) ok = vkBeginCommandBuffer(m_impl->cmdBuffer, &beginInfo) == VK_SUCCESS;
+    if (ok) {
+        vkCmdBindPipeline(m_impl->cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->pipeMatmul);
+        vkCmdBindDescriptorSets(m_impl->cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->plMatmul, 0, 1, &descSet, 0, nullptr);
+        uint32_t pushConsts[4] = { M, K, N, mode };
+        vkCmdPushConstants(m_impl->cmdBuffer, m_impl->plMatmul, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConsts), pushConsts);
+        vkCmdDispatch(m_impl->cmdBuffer, (N + 15) / 16, (M + 15) / 16, 1);
+        ok = vkEndCommandBuffer(m_impl->cmdBuffer) == VK_SUCCESS;
+    }
+    if (ok) {
+        VkSubmitInfo submitInfo{ VK_STRUCTURE_TYPE_SUBMIT_INFO, nullptr, 0, nullptr, nullptr, 1, &m_impl->cmdBuffer, 0, nullptr };
+        ok = vkQueueSubmit(m_impl->computeQueue, 1, &submitInfo, VK_NULL_HANDLE) == VK_SUCCESS;
+        if (ok) ok = vkQueueWaitIdle(m_impl->computeQueue) == VK_SUCCESS;
+    }
     vkFreeDescriptorSets(m_impl->device, m_impl->descPool, 1, &descSet);
+    if (!ok) {
+        LOGE("Vulkan matmul dispatch failed; running CPU fallback.");
+        return matmul(A, B, C, M, K, N, mode, false);
+    }
+    std::memcpy(C, m_impl->mapC, sizeC);
     ++m_gpuDispatchCount;
     return true;
 }
