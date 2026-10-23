@@ -309,6 +309,11 @@ object CheckpointManager {
                 transformer.adamStepCount.set(adamSteps)
                 transformer.trainingMode = mode
 
+                // Native training consumes the flattened JNI buffers; refresh them
+                // after loading per-parameter arrays or it would train stale random weights.
+                transformer.syncWeightsToFlat()
+                transformer.syncMomentsToFlat()
+
                 return LoadedCheckpointState(
                     step = step,
                     epoch = epoch,
