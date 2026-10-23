@@ -30,8 +30,8 @@ target_link_libraries(
 )
 
 # Compile the GLSL sources into the exact SPIR-V bytecode consumed by the app.
-# Android Studio builds without glslangValidator may use the checked-in header;
-# CI installs glslang-tools and always verifies/rebuilds bytecode from source.
+# Never silently use a stale checked-in binary after a shader source is changed.
+# Install glslang-tools for local native builds; CI installs it automatically.
 find_program(GLSLANG_VALIDATOR NAMES glslangValidator)
 if(GLSLANG_VALIDATOR)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -60,7 +60,7 @@ if(GLSLANG_VALIDATOR)
     add_dependencies(nexora_native nexora_spv_header)
     target_include_directories(nexora_native BEFORE PRIVATE "${NEXORA_GENERATED_DIR}")
 else()
-    message(WARNING "glslangValidator not found; using the checked-in SPIR-V header. Install glslang-tools to rebuild SPIR-V from shader source.")
+    message(FATAL_ERROR "glslangValidator is required: refusing to build with a stale checked-in SPIR-V header. Install glslang-tools and retry.")
 endif()
 
 target_include_directories(nexora_native PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
