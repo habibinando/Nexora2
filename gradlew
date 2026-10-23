@@ -8,7 +8,7 @@ if [ ! -f "$PROPERTIES" ]; then
   echo "gradlew: missing $PROPERTIES" >&2
   exit 1
 fi
-DIST_URL=$(sed -n 's/^distributionUrl=//p' "$PROPERTIES" | sed 's/\\:/\:/g' | tr -d '\r')
+DIST_URL=$(sed -n 's/^distributionUrl=//p' "$PROPERTIES" | sed 's/\\:/:/g' | tr -d '\r')
 if [ -z "$DIST_URL" ]; then
   echo "gradlew: distributionUrl is missing from $PROPERTIES" >&2
   exit 1
