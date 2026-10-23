@@ -570,49 +570,199 @@ bool VulkanComputeEngine::matmul(const float* A, const float* B, float* C, uint3
     return true;
 }
 
-bool VulkanComputeEngine::swiglu(const float* gate, const float* up, float* swigluOut, uint32_t count) {
-    #pragma clang loop vectorize(enable)
-    for (uint32_t i = 0; i < count; ++i) {
-        float z = gate[i];
-        float silu = z / (1.0f + std::exp(-z));
-        swigluOut[i] = silu * up[i];
+bool VulkanComputeEngine::swiglu(const float* gate, const float* up, float* swigluOut, uint32_t count, bool useGpu) {
+    auto cpu = [&]() -> bool {
+        #pragma clang loop vectorize(enable)
+        for (uint32_t i = 0; i < count; ++i) {
+            const float z = gate[i];
+            const float silu = z / (1.0f + std::exp(-z));
+            swigluOut[i] = silu * up[i];
+        }
+        return true;
+    };
+    const size_t bytes = static_cast<size_t>(count) * sizeof(float);
+    if (count == 0) return true;
+    if (!useGpu || !m_info.available || !m_impl->pipeSwiglu || bytes > Impl::MAX_BUF_SIZE ||
+        !m_impl->mapA || !m_impl->mapB || !m_impl->mapC) return cpu();
+
+    std::memcpy(m_impl->mapA, gate, bytes);
+    std::memcpy(m_impl->mapB, up, bytes);
+    VkDescriptorSetAllocateInfo alloc{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, m_impl->descPool, 1, &m_impl->dslSwiglu };
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (vkAllocateDescriptorSets(m_impl->device, &alloc, &set) != VK_SUCCESS) return cpu();
+    VkDescriptorBufferInfo infos[3] = {
+        {m_impl->bufA, 0, bytes}, {m_impl->bufB, 0, bytes}, {m_impl->bufC, 0, bytes}
+    };
+    VkWriteDescriptorSet writes[3]{};
+    for (uint32_t i = 0; i < 3; ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = set;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[i].pBufferInfo = &infos[i];
     }
+    vkUpdateDescriptorSets(m_impl->device, 3, writes, 0, nullptr);
+    bool ok = vkResetCommandBuffer(m_impl->cmdBuffer, 0) == VK_SUCCESS;
+    VkCommandBufferBeginInfo begin{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, nullptr, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, nullptr };
+    if (ok) ok = vkBeginCommandBuffer(m_impl->cmdBuffer, &begin) == VK_SUCCESS;
+    if (ok) {
+        vkCmdBindPipeline(m_impl->cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->pipeSwiglu);
+        vkCmdBindDescriptorSets(m_impl->cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->plSwiglu, 0, 1, &set, 0, nullptr);
+        vkCmdPushConstants(m_impl->cmdBuffer, m_impl->plSwiglu, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(count), &count);
+        vkCmdDispatch(m_impl->cmdBuffer, (count + 255) / 256, 1, 1);
+        ok = vkEndCommandBuffer(m_impl->cmdBuffer) == VK_SUCCESS;
+    }
+    if (ok) {
+        VkSubmitInfo submit{ VK_STRUCTURE_TYPE_SUBMIT_INFO, nullptr, 0, nullptr, nullptr, 1, &m_impl->cmdBuffer, 0, nullptr };
+        ok = vkQueueSubmit(m_impl->computeQueue, 1, &submit, VK_NULL_HANDLE) == VK_SUCCESS;
+        if (ok) ok = vkQueueWaitIdle(m_impl->computeQueue) == VK_SUCCESS;
+    }
+    vkFreeDescriptorSets(m_impl->device, m_impl->descPool, 1, &set);
+    if (!ok) {
+        LOGE("Vulkan SwiGLU dispatch failed; using CPU fallback.");
+        return cpu();
+    }
+    std::memcpy(swigluOut, m_impl->mapC, bytes);
+    ++m_gpuDispatchCount;
     return true;
 }
 
-bool VulkanComputeEngine::swigluBackward(const float* gate, const float* up, const float* dSwiglu, float* dGate, float* dUp, uint32_t count) {
-    #pragma clang loop vectorize(enable)
-    for (uint32_t i = 0; i < count; ++i) {
-        float z = gate[i];
-        float sig = 1.0f / (1.0f + std::exp(-z));
-        float silu = z * sig;
-        float ds = dSwiglu[i];
+bool VulkanComputeEngine::swigluBackward(const float* gate, const float* up, const float* dSwiglu,
+                                        float* dGate, float* dUp, uint32_t count, bool useGpu) {
+    auto cpu = [&]() -> bool {
+        #pragma clang loop vectorize(enable)
+        for (uint32_t i = 0; i < count; ++i) {
+            const float z = gate[i];
+            const float sig = 1.0f / (1.0f + std::exp(-z));
+            const float silu = z * sig;
+            const float ds = dSwiglu[i];
+            dUp[i] = ds * silu;
+            const float dsilu = ds * up[i];
+            dGate[i] = dsilu * (sig + silu * (1.0f - sig));
+        }
+        return true;
+    };
+    const size_t bytes = static_cast<size_t>(count) * sizeof(float);
+    if (count == 0) return true;
+    if (!useGpu || !m_info.available || !m_impl->pipeSwigluBack || bytes > Impl::MAX_BUF_SIZE ||
+        !m_impl->mapA || !m_impl->mapB || !m_impl->mapC || !m_impl->mapD || !m_impl->mapE) return cpu();
 
-        dUp[i] = ds * silu;
-        float dsilu = ds * up[i];
-        dGate[i] = dsilu * (sig + silu * (1.0f - sig));
+    std::memcpy(m_impl->mapA, gate, bytes);
+    std::memcpy(m_impl->mapB, up, bytes);
+    std::memcpy(m_impl->mapC, dSwiglu, bytes);
+    VkDescriptorSetAllocateInfo alloc{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, m_impl->descPool, 1, &m_impl->dslSwigluBack };
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (vkAllocateDescriptorSets(m_impl->device, &alloc, &set) != VK_SUCCESS) return cpu();
+    VkDescriptorBufferInfo infos[5] = {
+        {m_impl->bufA, 0, bytes}, {m_impl->bufB, 0, bytes}, {m_impl->bufC, 0, bytes},
+        {m_impl->bufD, 0, bytes}, {m_impl->bufE, 0, bytes}
+    };
+    VkWriteDescriptorSet writes[5]{};
+    for (uint32_t i = 0; i < 5; ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = set;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[i].pBufferInfo = &infos[i];
     }
+    vkUpdateDescriptorSets(m_impl->device, 5, writes, 0, nullptr);
+    bool ok = vkResetCommandBuffer(m_impl->cmdBuffer, 0) == VK_SUCCESS;
+    VkCommandBufferBeginInfo begin{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, nullptr, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, nullptr };
+    if (ok) ok = vkBeginCommandBuffer(m_impl->cmdBuffer, &begin) == VK_SUCCESS;
+    if (ok) {
+        vkCmdBindPipeline(m_impl->cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->pipeSwigluBack);
+        vkCmdBindDescriptorSets(m_impl->cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->plSwigluBack, 0, 1, &set, 0, nullptr);
+        vkCmdPushConstants(m_impl->cmdBuffer, m_impl->plSwigluBack, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(count), &count);
+        vkCmdDispatch(m_impl->cmdBuffer, (count + 255) / 256, 1, 1);
+        ok = vkEndCommandBuffer(m_impl->cmdBuffer) == VK_SUCCESS;
+    }
+    if (ok) {
+        VkSubmitInfo submit{ VK_STRUCTURE_TYPE_SUBMIT_INFO, nullptr, 0, nullptr, nullptr, 1, &m_impl->cmdBuffer, 0, nullptr };
+        ok = vkQueueSubmit(m_impl->computeQueue, 1, &submit, VK_NULL_HANDLE) == VK_SUCCESS;
+        if (ok) ok = vkQueueWaitIdle(m_impl->computeQueue) == VK_SUCCESS;
+    }
+    vkFreeDescriptorSets(m_impl->device, m_impl->descPool, 1, &set);
+    if (!ok) {
+        LOGE("Vulkan SwiGLU backward dispatch failed; using CPU fallback.");
+        return cpu();
+    }
+    std::memcpy(dGate, m_impl->mapD, bytes);
+    std::memcpy(dUp, m_impl->mapE, bytes);
+    ++m_gpuDispatchCount;
     return true;
 }
 
-bool VulkanComputeEngine::rmsNorm(const float* x, const float* w, float* outNorm, float* outInvStd, uint32_t D, float eps, uint32_t totalTokens) {
-    for (uint32_t t = 0; t < totalTokens; ++t) {
-        const float* xRow = x + (t * D);
-        float* outRow = outNorm + (t * D);
-
-        float sumSq = 0.0f;
-        #pragma clang loop vectorize(enable)
-        for (uint32_t i = 0; i < D; ++i) {
-            sumSq += xRow[i] * xRow[i];
+bool VulkanComputeEngine::rmsNorm(const float* x, const float* w, float* outNorm, float* outInvStd,
+                                  uint32_t D, float eps, uint32_t totalTokens, bool useGpu) {
+    auto cpu = [&]() -> bool {
+        for (uint32_t t = 0; t < totalTokens; ++t) {
+            const float* xRow = x + (static_cast<size_t>(t) * D);
+            float* outRow = outNorm + (static_cast<size_t>(t) * D);
+            float sumSq = 0.0f;
+            #pragma clang loop vectorize(enable)
+            for (uint32_t i = 0; i < D; ++i) sumSq += xRow[i] * xRow[i];
+            const float invStd = 1.0f / std::sqrt((sumSq / static_cast<float>(D)) + eps);
+            if (outInvStd) outInvStd[t] = invStd;
+            #pragma clang loop vectorize(enable)
+            for (uint32_t i = 0; i < D; ++i) outRow[i] = xRow[i] * invStd * w[i];
         }
-        float invStd = 1.0f / std::sqrt((sumSq / float(D)) + eps);
-        if (outInvStd) outInvStd[t] = invStd;
+        return true;
+    };
+    if (D == 0 || totalTokens == 0) return true;
+    const size_t inputBytes = static_cast<size_t>(D) * totalTokens * sizeof(float);
+    const size_t weightBytes = static_cast<size_t>(D) * sizeof(float);
+    const size_t invStdBytes = static_cast<size_t>(totalTokens) * sizeof(float);
+    if (!useGpu || !m_info.available || !m_impl->pipeRmsNorm || D > 256 ||
+        inputBytes > Impl::MAX_BUF_SIZE || weightBytes > Impl::MAX_BUF_SIZE ||
+        invStdBytes > Impl::MAX_BUF_SIZE || !m_impl->mapA || !m_impl->mapB ||
+        !m_impl->mapC || !m_impl->mapD) return cpu();
 
-        #pragma clang loop vectorize(enable)
-        for (uint32_t i = 0; i < D; ++i) {
-            outRow[i] = xRow[i] * invStd * w[i];
-        }
+    std::memcpy(m_impl->mapA, x, inputBytes);
+    std::memcpy(m_impl->mapB, w, weightBytes);
+    VkDescriptorSetAllocateInfo alloc{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, m_impl->descPool, 1, &m_impl->dslRmsNorm };
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (vkAllocateDescriptorSets(m_impl->device, &alloc, &set) != VK_SUCCESS) return cpu();
+    VkDescriptorBufferInfo infos[4] = {
+        {m_impl->bufA, 0, inputBytes}, {m_impl->bufB, 0, weightBytes},
+        {m_impl->bufC, 0, inputBytes}, {m_impl->bufD, 0, invStdBytes}
+    };
+    VkWriteDescriptorSet writes[4]{};
+    for (uint32_t i = 0; i < 4; ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = set;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[i].pBufferInfo = &infos[i];
     }
+    vkUpdateDescriptorSets(m_impl->device, 4, writes, 0, nullptr);
+    struct RmsPush { uint32_t D; float eps; uint32_t totalTokens; };
+    const RmsPush push{D, eps, totalTokens};
+    bool ok = vkResetCommandBuffer(m_impl->cmdBuffer, 0) == VK_SUCCESS;
+    VkCommandBufferBeginInfo begin{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, nullptr, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, nullptr };
+    if (ok) ok = vkBeginCommandBuffer(m_impl->cmdBuffer, &begin) == VK_SUCCESS;
+    if (ok) {
+        vkCmdBindPipeline(m_impl->cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->pipeRmsNorm);
+        vkCmdBindDescriptorSets(m_impl->cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->plRmsNorm, 0, 1, &set, 0, nullptr);
+        vkCmdPushConstants(m_impl->cmdBuffer, m_impl->plRmsNorm, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+        vkCmdDispatch(m_impl->cmdBuffer, totalTokens, 1, 1);
+        ok = vkEndCommandBuffer(m_impl->cmdBuffer) == VK_SUCCESS;
+    }
+    if (ok) {
+        VkSubmitInfo submit{ VK_STRUCTURE_TYPE_SUBMIT_INFO, nullptr, 0, nullptr, nullptr, 1, &m_impl->cmdBuffer, 0, nullptr };
+        ok = vkQueueSubmit(m_impl->computeQueue, 1, &submit, VK_NULL_HANDLE) == VK_SUCCESS;
+        if (ok) ok = vkQueueWaitIdle(m_impl->computeQueue) == VK_SUCCESS;
+    }
+    vkFreeDescriptorSets(m_impl->device, m_impl->descPool, 1, &set);
+    if (!ok) {
+        LOGE("Vulkan RMSNorm dispatch failed; using CPU fallback.");
+        return cpu();
+    }
+    std::memcpy(outNorm, m_impl->mapC, inputBytes);
+    if (outInvStd) std::memcpy(outInvStd, m_impl->mapD, invStdBytes);
+    ++m_gpuDispatchCount;
     return true;
 }
 
