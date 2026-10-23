@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import shutil
 import struct
 import subprocess
 import tempfile
@@ -31,6 +32,9 @@ def compile_shader(compiler: str, source: pathlib.Path, output: pathlib.Path) ->
     words = struct.unpack("<" + "I" * (len(binary) // 4), binary)
     if words[0] != 0x07230203:
         raise RuntimeError(f"Invalid SPIR-V magic number for {source}")
+    validator = shutil.which("spirv-val")
+    if validator:
+        subprocess.run([validator, "--target-env", "vulkan1.0", str(output)], check=True)
     return binary
 
 
