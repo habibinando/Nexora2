@@ -28,3 +28,39 @@ target_link_libraries(
     ${log-lib}
     ${vulkan-lib}
 )
+
+# Compile the GLSL sources into the exact SPIR-V bytecode consumed by the app.
+# Android Studio builds without glslangValidator may use the checked-in header;
+# CI installs glslang-tools and always verifies/rebuilds bytecode from source.
+find_program(GLSLANG_VALIDATOR NAMES glslangValidator)
+if(GLSLANG_VALIDATOR)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    set(NEXORA_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    set(NEXORA_SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
+    set(NEXORA_SHADER_SOURCES
+        "${NEXORA_SHADER_DIR}/matmul_tiled.comp"
+        "${NEXORA_SHADER_DIR}/adamw.comp"
+        "${NEXORA_SHADER_DIR}/swiglu.comp"
+        "${NEXORA_SHADER_DIR}/swiglu_backward.comp"
+        "${NEXORA_SHADER_DIR}/rmsnorm.comp"
+    )
+    add_custom_command(
+        OUTPUT "${NEXORA_GENERATED_DIR}/nexora_spv.h"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${NEXORA_GENERATED_DIR}"
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/generate_spv_header.py"
+            --compiler "${GLSLANG_VALIDATOR}"
+            --source-dir "${NEXORA_SHADER_DIR}"
+            --output "${NEXORA_GENERATED_DIR}/nexora_spv.h"
+        DEPENDS ${NEXORA_SHADER_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/generate_spv_header.py"
+        VERBATIM
+        COMMENT "Compiling Nexora compute shaders to validated SPIR-V modules"
+    )
+    add_custom_target(nexora_spv_header DEPENDS "${NEXORA_GENERATED_DIR}/nexora_spv.h")
+    add_dependencies(nexora_native nexora_spv_header)
+    target_include_directories(nexora_native BEFORE PRIVATE "${NEXORA_GENERATED_DIR}")
+else()
+    message(WARNING "glslangValidator not found; using the checked-in SPIR-V header. Install glslang-tools to rebuild SPIR-V from shader source.")
+endif()
+
+target_include_directories(nexora_native PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
