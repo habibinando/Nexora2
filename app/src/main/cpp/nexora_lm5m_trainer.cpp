@@ -452,61 +452,56 @@ TrainStepResult executeLM5MTrainStep(
             }
         }
 
-        // Inverse RoPE on dQ and dK
+        // Inverse RoPE on dQ and dK before projecting gradients back to activations.
         for (uint32_t t = 0; t < seqLen; ++t) {
             for (uint32_t h = 0; h < H; ++h) {
-                uint32_t hOffset = h * HD;
+                const uint32_t hOffset = h * HD;
                 for (uint32_t i = 0; i < 32; ++i) {
-                    float ang = t * s_invFreq[i];
-                    float c = std::cos(ang);
-                    float s = std::sin(ang);
+                    const float ang = t * s_invFreq[i];
+                    const float c = std::cos(ang);
+                    const float sn = std::sin(ang);
 
-                    float dq1 = dQ[t * D + hOffset + i];
-                    float dq2 = dQ[t * D + hOffset + i + 32];
-                    dQ[t * D + hOffset + i] = dq1 * c + dq2 * s;
-                    dQ[t * D + hOffset + i + 32] = dq2 * c - dq1 * s;
+                    const float dq1 = dQ[t * D + hOffset + i];
+                    const float dq2 = dQ[t * D + hOffset + i + 32];
+                    dQ[t * D + hOffset + i] = dq1 * c + dq2 * sn;
+                    dQ[t * D + hOffset + i + 32] = dq2 * c - dq1 * sn;
 
-                    float dk1 = dK[t * D + hOffset + i];
-                    float dk2 = dK[t * D + hOffset + i + 32];
-                    dK[t * D + hOffset + i] = dk1 * c + dk2 * s;
-                    dK[t * D + hOffset + i + 32] = dk2 * c - dk1 * s;
+                    const float dk1 = dK[t * D + hOffset + i];
+                    const float dk2 = dK[t * D + hOffset + i + 32];
+                    dK[t * D + hOffset + i] = dk1 * c + dk2 * sn;
+                    dK[t * D + hOffset + i + 32] = dk2 * c - dk1 * sn;
                 }
             }
+        }
 
-            // Projections backward
-            std::fill(dHAttn.begin(), dHAttn.end(), 0.0f);
-            for (uint32_t j = 0; j < D; ++j) {
-                float dq = dQ[t * D + j];
-                float dk = dK[t * D + j];
-                float dv = dV[t * D + j];
-                float* gwqRow = lw.gWq + (j * D);
-                float* gwkRow = lw.gWk + (j * D);
-                float* gwvRow = lw.gWv + (j * D);
-                const float* wqRow = lw.wq + (j * D);
-                const float* wkRow = lw.wk + (j * D);
-                const float* wvRow = lw.wv + (j * D);
-                const float* hRow = &lc.hAttn[t * D];
-                #pragma clang loop vectorize(enable)
-                for (uint32_t i = 0; i < D; ++i) {
-                    gwqRow[i] += dq * hRow[i];
-                    gwkRow[i] += dk * hRow[i];
-                    gwvRow[i] += dv * hRow[i];
-                    dHAttn[i] += dq * wqRow[i] + dk * wkRow[i] + dv * wvRow[i];
-                }
-            }
+        // dHAttn = dQ*Wq + dK*Wk + dV*Wv, and dW = dQ^T*hAttn.
+        // Weight gradients are independent dense products; batch all sequence rows.
+        std::vector<float> dHq(static_cast<size_t>(seqLen) * D);
+        std::vector<float> dHk(static_cast<size_t>(seqLen) * D);
+        std::vector<float> dHv(static_cast<size_t>(seqLen) * D);
+        vkEngine.matmul(dQ.data(), lw.wq, dHq.data(), seqLen, D, D, 0, useVulkan);
+        vkEngine.matmul(dK.data(), lw.wk, dHk.data(), seqLen, D, D, 0, useVulkan);
+        vkEngine.matmul(dV.data(), lw.wv, dHv.data(), seqLen, D, D, 0, useVulkan);
+        vkEngine.matmul(dQ.data(), lc.hAttn.data(), lw.gWq, D, seqLen, D, 2, useVulkan);
+        vkEngine.matmul(dK.data(), lc.hAttn.data(), lw.gWk, D, seqLen, D, 2, useVulkan);
+        vkEngine.matmul(dV.data(), lc.hAttn.data(), lw.gWv, D, seqLen, D, 2, useVulkan);
 
-            // Attention RMSNorm backward
-            float invStd = lc.invStdAttn[t];
-            const float* prevX = (l == 0) ? &xIn[t * D] : &caches[l - 1].xOut[t * D];
+        // Attention RMSNorm backward.
+        for (uint32_t t = 0; t < seqLen; ++t) {
+            const size_t row = static_cast<size_t>(t) * D;
+            const float invStd = lc.invStdAttn[t];
+            const float* prevX = (l == 0) ? &xIn[row] : &caches[l - 1].xOut[row];
             float sumDxW = 0.0f;
             for (uint32_t i = 0; i < D; ++i) {
-                lw.gAttnNorm[i] += dHAttn[i] * prevX[i] * invStd;
-                sumDxW += dHAttn[i] * lw.attnNorm[i] * prevX[i];
+                const float dH = dHq[row + i] + dHk[row + i] + dHv[row + i];
+                lw.gAttnNorm[i] += dH * prevX[i] * invStd;
+                sumDxW += dH * lw.attnNorm[i] * prevX[i];
             }
-            float factor = sumDxW / (static_cast<float>(D) * (1.0f / (invStd * invStd)));
+            const float factor = sumDxW / (static_cast<float>(D) * (1.0f / (invStd * invStd)));
             #pragma clang loop vectorize(enable)
             for (uint32_t i = 0; i < D; ++i) {
-                dXPrev[t * D + i] += (dHAttn[i] * lw.attnNorm[i] - prevX[i] * factor) * invStd;
+                const float dH = dHq[row + i] + dHk[row + i] + dHv[row + i];
+                dXPrev[row + i] += (dH * lw.attnNorm[i] - prevX[i] * factor) * invStd;
             }
         }
 
