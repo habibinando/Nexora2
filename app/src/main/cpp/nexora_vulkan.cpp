@@ -289,6 +289,8 @@ bool VulkanComputeEngine::init() {
     };
     VkDescriptorPoolCreateInfo descPoolInfo{};
     descPoolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    // The engine frees each temporary descriptor set after a completed dispatch.
+    descPoolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
     descPoolInfo.maxSets = 32;
     descPoolInfo.poolSizeCount = 1;
     descPoolInfo.pPoolSizes = poolSizes;
