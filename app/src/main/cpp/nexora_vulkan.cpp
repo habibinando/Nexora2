@@ -460,8 +460,10 @@ bool VulkanComputeEngine::matmul(const float* A, const float* B, float* C, uint3
     size_t sizeB = (mode == 1 ? N * K : K * N) * sizeof(float);
     size_t sizeC = M * N * sizeof(float);
 
+    // Oversized matrices still produce a valid result via CPU fallback. Returning
+    // false here used to leave output buffers untouched for long sequences.
     if (sizeA > Impl::MAX_BUF_SIZE || sizeB > Impl::MAX_BUF_SIZE || sizeC > Impl::MAX_BUF_SIZE) {
-        return false;
+        return matmul(A, B, C, M, K, N, mode, false);
     }
 
     // Direct Host-Visible UMA memory copy
@@ -472,7 +474,7 @@ bool VulkanComputeEngine::matmul(const float* A, const float* B, float* C, uint3
     VkDescriptorSetAllocateInfo allocInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, m_impl->descPool, 1, &m_impl->dslMatmul };
     VkDescriptorSet descSet = VK_NULL_HANDLE;
     if (vkAllocateDescriptorSets(m_impl->device, &allocInfo, &descSet) != VK_SUCCESS) {
-        return false;
+        return matmul(A, B, C, M, K, N, mode, false);
     }
 
     VkDescriptorBufferInfo bInfoA{ m_impl->bufA, 0, sizeA };
