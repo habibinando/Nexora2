@@ -125,9 +125,14 @@ fun DashboardScreen(
                         Spacer(modifier = Modifier.width(6.dp))
                         val isVulkan = com.nexora.model.NexoraNative.isVulkanAvailable()
                         val isNdkRunning = com.nexora.model.NexoraNative.isNdkLoaded
+                        val vulkanStatus = com.nexora.model.NexoraNative.getVulkanStatus()
+                        val detectedVulkanApi = vulkanStatus
+                            .takeIf { it.startsWith("Vulkan device API ") }
+                            ?.substringAfter("Vulkan device API ")
+                            ?.substringBefore(" |")
                         val engineStatusText = when {
-                            isVulkan -> "ENGINE ONLINE • VULKAN 1.2+ GPU AKTIF • LARGEHEAP"
-                            isNdkRunning -> "ENGINE ONLINE • NDK C++20 SIMD AKTIF • LARGEHEAP"
+                            isVulkan -> "ENGINE ONLINE • VULKAN API ${detectedVulkanApi ?: "AVAILABLE"} • LARGEHEAP"
+                            isNdkRunning -> "ENGINE ONLINE • NDK C++20 SIMD • LARGEHEAP"
                             else -> "ENGINE ONLINE • JVM ENGINE • LARGEHEAP"
                         }
                         Text(

@@ -240,8 +240,8 @@ fun SettingsScreen(
                     Spacer(modifier = Modifier.height(10.dp))
 
                     Text(
-                        text = "1. Akselerasi Vulkan 1.2+ GPU Compute (Android 15):\n" +
-                               "Nexora memanfaatkan Vulkan Compute Pipeline dengan shader tiled-GEMM ber-shared memory (16x16 local workgroup) untuk mengeksekusi proyeksi Attention (Q, K, V, Wo) dan SwiGLU FFN yang mencakup >85% komputasi FLOPs tanpa ketergantungan float atomics. Dipadukan dengan NDK C++20 SIMD, kecepatan training melonjak dari 5.5 tok/s (JVM) hingga 60 - 150+ tok/s secara nyata dan terukur! Jika Vulkan GPU tidak tersedia di lingkungan perangkat, sistem otomatis fallback ke multi-core ARM NEON SIMD.",
+                        text = "1. Akselerasi Vulkan Compute (versi API dari runtime):\n" +
+                               "Nexora membaca versi API yang dilaporkan perangkat melalui Vulkan runtime. Jalur GPU saat ini mencakup operasi matmul dan AdamW ketika shader, pipeline, buffer, dan dispatch berhasil; beberapa operasi lain, termasuk aktivasi SwiGLU dan normalisasi, masih berjalan di CPU. Jika operasi GPU tidak tersedia atau gagal, operasi tersebut kembali ke jalur CPU. Kecepatan training bergantung pada GPU, driver, konfigurasi model, panjang sequence, dan beban perangkat; aplikasi tidak mengasumsikan atau menjanjikan angka token/detik tertentu.",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextSecondary,
                         lineHeight = 18.sp
