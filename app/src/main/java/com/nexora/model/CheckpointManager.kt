@@ -77,6 +77,9 @@ object CheckpointManager {
         isManual: Boolean = false,
         isBestVal: Boolean = false
     ): CheckpointInfo {
+        // Synchronize parameter and AdamW moment arrays after a native GPU step
+        // before serializing the resumable checkpoint.
+        transformer.syncOptimizerStateForCheckpoint()
         val dir = getCheckpointDir(context)
         val timestamp = System.currentTimeMillis()
         val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
