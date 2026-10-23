@@ -384,10 +384,22 @@ bool VulkanComputeEngine::init() {
 
 std::string VulkanComputeEngine::getStatusString() const {
     if (!m_info.available) {
-        return "CPU Multi-Threaded SIMD (Active Fallback)";
+        return "Vulkan GPU compute inactive; CPU fallback active";
     }
+
+    // Display the physical device API version reported by the Vulkan runtime.
+    // Do not label a device as Vulkan 1.2+ unless the runtime actually reports it.
+    const uint32_t version = m_info.apiVersion;
     std::ostringstream ss;
-    ss << "Vulkan 1.2+ GPU Active: " << m_info.deviceName;
+    if (version != 0) {
+        ss << "Vulkan device API "
+           << VK_VERSION_MAJOR(version) << "."
+           << VK_VERSION_MINOR(version) << "."
+           << VK_VERSION_PATCH(version);
+    } else {
+        ss << "Vulkan device API version unavailable";
+    }
+    ss << " | Compute device: " << m_info.deviceName;
     return ss.str();
 }
 
