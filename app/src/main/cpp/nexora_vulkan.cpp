@@ -859,6 +859,7 @@ void VulkanComputeEngine::cleanup() {
         destroyBuf(m_impl->bufB, m_impl->memB);
         destroyBuf(m_impl->bufC, m_impl->memC);
         destroyBuf(m_impl->bufD, m_impl->memD);
+        destroyBuf(m_impl->bufE, m_impl->memE);
 
         auto destroyPipe = [&](VkPipeline& p, VkPipelineLayout& pl, VkDescriptorSetLayout& dsl, VkShaderModule& sh) {
             if (p != VK_NULL_HANDLE) { vkDestroyPipeline(m_impl->device, p, nullptr); p = VK_NULL_HANDLE; }
@@ -870,6 +871,8 @@ void VulkanComputeEngine::cleanup() {
         destroyPipe(m_impl->pipeMatmul, m_impl->plMatmul, m_impl->dslMatmul, m_impl->shMatmul);
         destroyPipe(m_impl->pipeAdamW, m_impl->plAdamW, m_impl->dslAdamW, m_impl->shAdamW);
         destroyPipe(m_impl->pipeSwiglu, m_impl->plSwiglu, m_impl->dslSwiglu, m_impl->shSwiglu);
+        destroyPipe(m_impl->pipeSwigluBack, m_impl->plSwigluBack, m_impl->dslSwigluBack, m_impl->shSwigluBack);
+        destroyPipe(m_impl->pipeRmsNorm, m_impl->plRmsNorm, m_impl->dslRmsNorm, m_impl->shRmsNorm);
 
         if (m_impl->descPool != VK_NULL_HANDLE) {
             vkDestroyDescriptorPool(m_impl->device, m_impl->descPool, nullptr);
