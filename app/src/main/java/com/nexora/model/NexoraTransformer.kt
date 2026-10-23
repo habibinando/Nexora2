@@ -767,6 +767,8 @@ class NexoraTransformer(
         optimizerType: OptimizerType = OptimizerType.ADAMW,
         maxGradNorm: Float = 1.0f
     ): Pair<Float, Float> {
+        // Reset first: a failed native call must never inherit a previous step's Vulkan status.
+        lastStepUsedVulkan = false
         val tLen = tokens.size
         if (tLen < 2) return Pair(0.0f, 0.0f)
 

@@ -70,7 +70,7 @@ class NexoraTrainer(
             isLoRAActive = (transformer.trainingMode == TrainingMode.LORA_ADAPTER),
             trainingMode = transformer.trainingMode,
             isNdkActive = NexoraNative.isNdkLoaded,
-            isVulkanActive = NexoraNative.isVulkanAvailable(),
+            isVulkanActive = transformer.lastStepUsedVulkan,
             vulkanStatus = NexoraNative.getVulkanStatus()
         )
     )
@@ -89,7 +89,7 @@ class NexoraTrainer(
                 isLoRAActive = (transformer.trainingMode == TrainingMode.LORA_ADAPTER),
                 trainingMode = transformer.trainingMode,
                 isNdkActive = NexoraNative.isNdkLoaded,
-                isVulkanActive = NexoraNative.isVulkanAvailable(),
+                isVulkanActive = transformer.lastStepUsedVulkan,
                 vulkanStatus = NexoraNative.getVulkanStatus()
             )
         }
@@ -138,7 +138,7 @@ class NexoraTrainer(
                 lrSchedulerType = config2026.lrSchedulerType,
                 trainingMode = transformer.trainingMode,
                 isNdkActive = NexoraNative.isNdkLoaded,
-                isVulkanActive = NexoraNative.isVulkanAvailable(),
+                isVulkanActive = false,
                 vulkanStatus = NexoraNative.getVulkanStatus(),
                 statusMessage = "Pelatihan dimulai (${transformer.trainingMode.displayName}, ${config2026.optimizerType.displayName})"
             )
