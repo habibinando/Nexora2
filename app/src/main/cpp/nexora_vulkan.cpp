@@ -206,10 +206,24 @@ bool VulkanComputeEngine::init() {
     VkPhysicalDevice chosenDevice = VK_NULL_HANDLE;
     uint32_t chosenQueueIndex = 0;
     VkPhysicalDeviceProperties chosenProps{};
+    int chosenDeviceScore = -1;
 
+    // Prefer a real hardware GPU over a software/CPU Vulkan implementation.
+    // Device names and types come from the driver; the application never assumes
+    // a particular GPU vendor or Vulkan API version.
     for (const auto& dev : devices) {
-        VkPhysicalDeviceProperties props;
+        VkPhysicalDeviceProperties props{};
         vkGetPhysicalDeviceProperties(dev, &props);
+
+        int score = 1;
+        switch (props.deviceType) {
+            case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: score = 5; break;
+            case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: score = 4; break;
+            case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: score = 3; break;
+            case VK_PHYSICAL_DEVICE_TYPE_OTHER: score = 2; break;
+            case VK_PHYSICAL_DEVICE_TYPE_CPU: score = 1; break;
+            default: score = 1; break;
+        }
 
         uint32_t qfCount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(dev, &qfCount, nullptr);
@@ -217,14 +231,14 @@ bool VulkanComputeEngine::init() {
         vkGetPhysicalDeviceQueueFamilyProperties(dev, &qfCount, qfProps.data());
 
         for (uint32_t q = 0; q < qfCount; ++q) {
-            if (qfProps[q].queueFlags & VK_QUEUE_COMPUTE_BIT) {
+            if ((qfProps[q].queueFlags & VK_QUEUE_COMPUTE_BIT) && score > chosenDeviceScore) {
                 chosenDevice = dev;
                 chosenQueueIndex = q;
                 chosenProps = props;
+                chosenDeviceScore = score;
                 break;
             }
         }
-        if (chosenDevice != VK_NULL_HANDLE) break;
     }
 
     if (chosenDevice == VK_NULL_HANDLE) {
