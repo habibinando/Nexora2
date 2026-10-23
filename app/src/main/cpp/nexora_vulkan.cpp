@@ -321,7 +321,7 @@ bool VulkanComputeEngine::init() {
         vkCreateComputePipelines(m_impl->device, VK_NULL_HANDLE, 1, &pipeInfo, nullptr, &m_impl->pipeMatmul);
     }
 
-    // (b) AdamW (4 storage buffers: param, grad, m, v; PushConstants 32 bytes)
+    // (b) AdamW (4 storage buffers: param, grad, m, v; PushConstants 36 bytes)
     m_impl->shAdamW = m_impl->createShaderModule(spv_adamw, spv_adamw_size);
     if (m_impl->shAdamW != VK_NULL_HANDLE) {
         VkDescriptorSetLayoutBinding bindings[4] = {
@@ -333,7 +333,7 @@ bool VulkanComputeEngine::init() {
         VkDescriptorSetLayoutCreateInfo dslInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 4, bindings };
         vkCreateDescriptorSetLayout(m_impl->device, &dslInfo, nullptr, &m_impl->dslAdamW);
 
-        VkPushConstantRange pcr{ VK_SHADER_STAGE_COMPUTE_BIT, 0, 8 * sizeof(uint32_t) };
+        VkPushConstantRange pcr{ VK_SHADER_STAGE_COMPUTE_BIT, 0, 9 * sizeof(uint32_t) };
         VkPipelineLayoutCreateInfo plInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 1, &m_impl->dslAdamW, 1, &pcr };
         vkCreatePipelineLayout(m_impl->device, &plInfo, nullptr, &m_impl->plAdamW);
 
@@ -560,11 +560,11 @@ bool VulkanComputeEngine::rmsNorm(const float* x, const float* w, float* outNorm
 }
 
 bool VulkanComputeEngine::adamWUpdate(float* param, float* grad, float* m, float* v, uint32_t count,
-                                     float beta1, float beta2, float alphaT, float eps,
+                                     float beta1, float beta2, float alphaT, float eps, float learningRate,
                                      float weightDecay, float clipScale, bool is2D, bool useGpu) {
     const size_t bytes = static_cast<size_t>(count) * sizeof(float);
     auto cpu = [&]() -> bool {
-        const float decayFactor = (is2D && weightDecay > 0.0f) ? (1.0f - alphaT * weightDecay) : 1.0f;
+        const float decayFactor = (is2D && weightDecay > 0.0f) ? (1.0f - learningRate * weightDecay) : 1.0f;
         #pragma clang loop vectorize(enable)
         for (uint32_t i = 0; i < count; ++i) {
             if (is2D && weightDecay > 0.0f) param[i] *= decayFactor;
@@ -612,8 +612,9 @@ bool VulkanComputeEngine::adamWUpdate(float* param, float* grad, float* m, float
         float weightDecay;
         float clipScale;
         uint32_t is2D;
+        float learningRate;
     };
-    const AdamPush push{count, beta1, beta2, alphaT, eps, weightDecay, clipScale, is2D ? 1u : 0u};
+    const AdamPush push{count, beta1, beta2, alphaT, eps, weightDecay, clipScale, is2D ? 1u : 0u, learningRate};
     bool ok = vkResetCommandBuffer(m_impl->cmdBuffer, 0) == VK_SUCCESS;
     VkCommandBufferBeginInfo beginInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, nullptr, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, nullptr };
     if (ok) ok = vkBeginCommandBuffer(m_impl->cmdBuffer, &beginInfo) == VK_SUCCESS;
