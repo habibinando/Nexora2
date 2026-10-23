@@ -11,10 +11,11 @@ layout(push_constant) uniform AdamPush {
     float beta1;
     float beta2;
     float alphaT;
-    float eps;
+    float epsCorrected;
     float weightDecay;
     float clipScale;
     uint is2D;
+    float learningRate;
 } pc;
 
 void main() {
@@ -22,7 +23,7 @@ void main() {
     if (idx >= pc.count) return;
 
     if (pc.is2D != 0u && pc.weightDecay > 0.0) {
-        params[idx] *= (1.0 - pc.alphaT * pc.weightDecay);
+        params[idx] *= (1.0 - pc.learningRate * pc.weightDecay);
     }
 
     float g = grads[idx] * pc.clipScale;
@@ -32,6 +33,6 @@ void main() {
     m[idx] = mVal;
     v[idx] = vVal;
 
-    params[idx] -= pc.alphaT * mVal / (sqrt(vVal) + pc.eps);
+    params[idx] -= pc.alphaT * mVal / (sqrt(vVal) + pc.epsCorrected);
     grads[idx] = 0.0;
 }
