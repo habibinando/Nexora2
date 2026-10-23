@@ -838,7 +838,8 @@ class NexoraTransformer(
                     step = step,
                     preferVulkan = preferVulkan
                 )
-                if (res.size >= 3 && res[0].isFinite() && res[1].isFinite()) {
+                if (res.size >= 4 && res[3] > 0.5f &&
+                    res[0].isFinite() && res[1].isFinite() && res[1] >= 0f) {
                     adamStepCount.set(step.toLong())
                     lastStepUsedNativeAdamW = true
                     lastStepUsedVulkan = (res[2] > 0.5f)
