@@ -36,6 +36,12 @@ jobs:
           distribution: temurin
           java-version: '25'
 
+      - name: Set up Gradle 9.8.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.8.1'
+          cache-read-only: false
+
       - name: Accept Android SDK licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
 
@@ -51,11 +57,11 @@ jobs:
       - name: Verify toolchain
         run: |
           java -version
-          ./gradlew --version
+          gradle --version
           test -d "$ANDROID_HOME/ndk/30.0.16248370"
 
       - name: Build debug APK
-        run: ./gradlew --no-daemon --stacktrace assembleDebug
+        run: gradle --no-daemon --stacktrace assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
