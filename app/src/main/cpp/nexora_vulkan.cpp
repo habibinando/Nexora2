@@ -815,13 +815,13 @@ bool VulkanComputeEngine::adamWUpdate(float* param, float* grad, float* m, float
         float beta1;
         float beta2;
         float alphaT;
-        float eps;
+        float epsCorrected;
         float weightDecay;
         float clipScale;
         uint32_t is2D;
         float learningRate;
     };
-    const AdamPush push{count, beta1, beta2, alphaT, eps, weightDecay, clipScale, is2D ? 1u : 0u, learningRate};
+    const AdamPush push{count, beta1, beta2, alphaT, epsCorrected, weightDecay, clipScale, is2D ? 1u : 0u, learningRate};
     bool ok = vkResetCommandBuffer(m_impl->cmdBuffer, 0) == VK_SUCCESS;
     VkCommandBufferBeginInfo beginInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, nullptr, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, nullptr };
     if (ok) ok = vkBeginCommandBuffer(m_impl->cmdBuffer, &beginInfo) == VK_SUCCESS;
