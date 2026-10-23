@@ -309,19 +309,19 @@ TrainStepResult executeLM5MTrainStep(
 
         float targetProb = rowLogits[target];
         batchLoss += -std::log(std::max(1e-12f, targetProb));
-        rowLogits[target] -= 1.0f; // dLogits
-
+        rowLogits[target] -= 1.0f; // dSoftmax = p - oneHot(target)
         for (uint32_t v = 0; v < LM5MOffsets::VOCAB_SIZE; ++v) {
-            float dL = rowLogits[v] * invNormFactor;
-            const float* embRow = tokEmb + (v * D);
-            float* gEmbRow = gradTokEmb + (v * D);
-            #pragma clang loop vectorize(enable)
-            for (uint32_t i = 0; i < D; ++i) {
-                dXFinal[t * D + i] += dL * embRow[i];
-                gEmbRow[i] += dL * xFinal[t * D + i];
-            }
+            rowLogits[v] *= invNormFactor;
         }
     }
+
+    // Exact tied-embedding gradients are matrix products too:
+    // dX = dLogits * tokenEmbedding and dEmbedding = dLogits^T * X.
+    // This removes the huge per-target x vocabulary x hidden CPU loop.
+    vkEngine.matmul(logits.data(), tokEmb, dXFinal.data(), numTargets,
+                    LM5MOffsets::VOCAB_SIZE, D, 0, useVulkan);
+    vkEngine.matmul(logits.data(), xFinal.data(), gradTokEmb,
+                    LM5MOffsets::VOCAB_SIZE, numTargets, D, 2, useVulkan);
 
     result.loss = batchLoss / static_cast<float>(numTargets);
 
