@@ -180,15 +180,16 @@ TrainStepResult executeLM5MTrainStep(
         auto& lc = caches[l];
         const auto& lw = layers[l];
 
-        // Attention Pre-RMSNorm & Projections
+        // Attention Pre-RMSNorm. Weight matrices are stored output-major [out, in],
+        // so forward projections use A * W^T (matmul mode 1). Batch tokens into
+        // one dispatch per projection to reduce per-token Vulkan submission overhead.
         for (uint32_t t = 0; t < seqLen; ++t) {
             lc.invStdAttn[t] = applyRmsNorm(&currentX[t * D], lw.attnNorm, &lc.hAttn[t * D], D);
-
-            // Q = h * wq, K = h * wk, V = h * wv
-            vkEngine.matmul(&lc.hAttn[t * D], lw.wq, &lc.q[t * D], 1, D, D, 0, useVulkan);
-            vkEngine.matmul(&lc.hAttn[t * D], lw.wk, &lc.k[t * D], 1, D, D, 0, useVulkan);
-            vkEngine.matmul(&lc.hAttn[t * D], lw.wv, &lc.v[t * D], 1, D, D, 0, useVulkan);
-
+        }
+        vkEngine.matmul(lc.hAttn.data(), lw.wq, lc.q.data(), seqLen, D, D, 1, useVulkan);
+        vkEngine.matmul(lc.hAttn.data(), lw.wk, lc.k.data(), seqLen, D, D, 1, useVulkan);
+        vkEngine.matmul(lc.hAttn.data(), lw.wv, lc.v.data(), seqLen, D, D, 1, useVulkan);
+        for (uint32_t t = 0; t < seqLen; ++t) {
             for (uint32_t h = 0; h < H; ++h) {
                 applyRope(&lc.q[t * D], h * HD, t);
                 applyRope(&lc.k[t * D], h * HD, t);
@@ -233,35 +234,31 @@ TrainStepResult executeLM5MTrainStep(
             }
         }
 
-        // Wo projection + Residual -> xMid
-        for (uint32_t t = 0; t < seqLen; ++t) {
-            vkEngine.matmul(&lc.outHeads[t * D], lw.wo, hTemp.data(), 1, D, D, 0, useVulkan);
-            #pragma clang loop vectorize(enable)
-            for (uint32_t i = 0; i < D; ++i) {
-                lc.xMid[t * D + i] = currentX[t * D + i] + hTemp[i];
-            }
+        // Wo projection + Residual -> xMid. All projection weights are [out, in].
+        vkEngine.matmul(lc.outHeads.data(), lw.wo, lc.xMid.data(), seqLen, D, D, 1, useVulkan);
+        #pragma clang loop vectorize(enable)
+        for (uint32_t i = 0; i < seqLen * D; ++i) {
+            lc.xMid[i] += currentX[i];
         }
 
-        // SwiGLU FFN
+        // SwiGLU FFN. Batch each dense projection to avoid one Vulkan dispatch per token.
         for (uint32_t t = 0; t < seqLen; ++t) {
             lc.invStdFfn[t] = applyRmsNorm(&lc.xMid[t * D], lw.ffnNorm, &lc.hFfn[t * D], D);
-
-            vkEngine.matmul(&lc.hFfn[t * D], lw.w1, &lc.gate[t * DFF], 1, D, DFF, 0, useVulkan);
-            vkEngine.matmul(&lc.hFfn[t * D], lw.w3, &lc.up[t * DFF], 1, D, DFF, 0, useVulkan);
-
-            #pragma clang loop vectorize(enable)
-            for (uint32_t j = 0; j < DFF; ++j) {
-                float z = lc.gate[t * DFF + j];
-                float sVal = z / (1.0f + std::exp(-z));
-                lc.silu[t * DFF + j] = sVal;
-                lc.swiglu[t * DFF + j] = sVal * lc.up[t * DFF + j];
-            }
-
-            vkEngine.matmul(&lc.swiglu[t * DFF], lw.w2, downTemp.data(), 1, DFF, D, 0, useVulkan);
-            #pragma clang loop vectorize(enable)
-            for (uint32_t i = 0; i < D; ++i) {
-                lc.xOut[t * D + i] = lc.xMid[t * D + i] + downTemp[i];
-            }
+        }
+        vkEngine.matmul(lc.hFfn.data(), lw.w1, lc.gate.data(), seqLen, D, DFF, 1, useVulkan);
+        vkEngine.matmul(lc.hFfn.data(), lw.w3, lc.up.data(), seqLen, D, DFF, 1, useVulkan);
+        #pragma clang loop vectorize(enable)
+        for (uint32_t i = 0; i < seqLen * DFF; ++i) {
+            float z = lc.gate[i];
+            float sVal = z / (1.0f + std::exp(-z));
+            lc.silu[i] = sVal;
+            lc.swiglu[i] = sVal * lc.up[i];
+        }
+        // W2 is also stored [out, in], therefore transpose it for forward projection.
+        vkEngine.matmul(lc.swiglu.data(), lw.w2, lc.xOut.data(), seqLen, DFF, D, 1, useVulkan);
+        #pragma clang loop vectorize(enable)
+        for (uint32_t i = 0; i < seqLen * D; ++i) {
+            lc.xOut[i] += lc.xMid[i];
         }
 
         currentX = lc.xOut.data();
@@ -278,37 +275,43 @@ TrainStepResult executeLM5MTrainStep(
     uint32_t numTargets = seqLen - 1;
     float batchLoss = 0.0f;
     std::vector<float> dXFinal(seqLen * D, 0.0f);
-    std::vector<float> logits(LM5MOffsets::VOCAB_SIZE);
+    // Compute all next-token logits in one matrix operation: [T-1,D] * [V,D]^T.
+    // This is the largest repeated per-token dispatch in the original implementation.
+    std::vector<float> logits(static_cast<size_t>(numTargets) * LM5MOffsets::VOCAB_SIZE);
     float invNormFactor = 1.0f / static_cast<float>(numTargets);
+    vkEngine.matmul(xFinal.data(), tokEmb, logits.data(), numTargets, D,
+                    LM5MOffsets::VOCAB_SIZE, 1, useVulkan);
 
     for (uint32_t t = 0; t < numTargets; ++t) {
-        // Logits = xFinal[t] * tokEmb^T
-        vkEngine.matmul(&xFinal[t * D], tokEmb, logits.data(), 1, D, LM5MOffsets::VOCAB_SIZE, 1, useVulkan);
+        float* rowLogits = logits.data() + static_cast<size_t>(t) * LM5MOffsets::VOCAB_SIZE;
         int32_t target = tokens[t + 1];
+        if (target < 0 || target >= static_cast<int32_t>(LM5MOffsets::VOCAB_SIZE)) {
+            LOGD("Invalid target token id at position %u; skipping invalid training step.", t + 1);
+            return result;
+        }
 
         float maxL = -1e30f;
         for (uint32_t v = 0; v < LM5MOffsets::VOCAB_SIZE; ++v) {
-            if (logits[v] > maxL) maxL = logits[v];
+            if (rowLogits[v] > maxL) maxL = rowLogits[v];
         }
 
         float sumExp = 0.0f;
         for (uint32_t v = 0; v < LM5MOffsets::VOCAB_SIZE; ++v) {
-            float e = std::exp(logits[v] - maxL);
-            logits[v] = e;
+            float e = std::exp(rowLogits[v] - maxL);
+            rowLogits[v] = e;
             sumExp += e;
         }
         float invSum = 1.0f / sumExp;
         for (uint32_t v = 0; v < LM5MOffsets::VOCAB_SIZE; ++v) {
-            logits[v] *= invSum;
+            rowLogits[v] *= invSum;
         }
 
-        float targetProb = logits[target];
+        float targetProb = rowLogits[target];
         batchLoss += -std::log(std::max(1e-12f, targetProb));
-
-        logits[target] -= 1.0f; // dLogits
+        rowLogits[target] -= 1.0f; // dLogits
 
         for (uint32_t v = 0; v < LM5MOffsets::VOCAB_SIZE; ++v) {
-            float dL = logits[v] * invNormFactor;
+            float dL = rowLogits[v] * invNormFactor;
             const float* embRow = tokEmb + (v * D);
             float* gEmbRow = gradTokEmb + (v * D);
             #pragma clang loop vectorize(enable)
@@ -362,7 +365,7 @@ TrainStepResult executeLM5MTrainStep(
 
             // Down projection backward:
             // dSwiglu = dXCurrent * w2^T
-            vkEngine.matmul(&dXCurrent[t * D], lw.w2, dSwiglu.data(), 1, D, DFF, 1, useVulkan);
+            vkEngine.matmul(&dXCurrent[t * D], lw.w2, dSwiglu.data(), 1, D, DFF, 0, useVulkan);
 
             // gradW2 += dXCurrent^T * swiglu
             for (uint32_t i = 0; i < D; ++i) {
@@ -426,7 +429,7 @@ TrainStepResult executeLM5MTrainStep(
             std::memcpy(&dXPrev[t * D], &dXMid[t * D], D * sizeof(float));
 
             // wo projection backward:
-            vkEngine.matmul(&dXMid[t * D], lw.wo, &dOutHeads[t * D], 1, D, D, 1, useVulkan);
+            vkEngine.matmul(&dXMid[t * D], lw.wo, &dOutHeads[t * D], 1, D, D, 0, useVulkan);
 
             // gradWo += dXMid^T * outHeads
             for (uint32_t i = 0; i < D; ++i) {
@@ -568,9 +571,13 @@ TrainStepResult executeLM5MTrainStep(
     float b1Pow = std::pow(b1, static_cast<float>(step));
     float b2Pow = std::pow(b2, static_cast<float>(step));
     float alphaT = learningRate * std::sqrt(1.0f - b2Pow) / (1.0f - b1Pow);
+    // With bias-corrected alphaT and uncorrected second moment, scale epsilon
+    // by sqrt(1-beta2^step) to match standard AdamW denominator semantics.
+    float epsCorrected = eps * std::sqrt(1.0f - b2Pow);
 
     auto updateAdam = [&](float* param, float* grad, float* m, float* v, uint32_t count, bool is2D) {
-        vkEngine.adamWUpdate(param, grad, m, v, count, b1, b2, alphaT, eps, weightDecay, clipScale, is2D, useVulkan);
+        vkEngine.adamWUpdate(param, grad, m, v, count, b1, b2, alphaT,
+                             epsCorrected, learningRate, weightDecay, clipScale, is2D, useVulkan);
     };
 
     // tokEmb [4096, 256]: 2D weight matrix -> weight decay active
