@@ -22,20 +22,6 @@ static void ensureRopeInit() {
     s_ropeInitialized = true;
 }
 
-static inline float applyRmsNorm(const float* x, const float* w, float* out, uint32_t D, float eps = 1e-5f) {
-    float sumSq = 0.0f;
-    #pragma clang loop vectorize(enable)
-    for (uint32_t i = 0; i < D; ++i) {
-        sumSq += x[i] * x[i];
-    }
-    float invStd = 1.0f / std::sqrt((sumSq / static_cast<float>(D)) + eps);
-    #pragma clang loop vectorize(enable)
-    for (uint32_t i = 0; i < D; ++i) {
-        out[i] = x[i] * invStd * w[i];
-    }
-    return invStd;
-}
-
 static inline void applyRope(float* vec, uint32_t offset, uint32_t pos) {
     for (uint32_t i = 0; i < 32; ++i) {
         float ang = pos * s_invFreq[i];
@@ -160,7 +146,6 @@ TrainStepResult executeLM5MTrainStep(
         std::vector<float> invStdFfn;
         std::vector<float> gate;
         std::vector<float> up;
-        std::vector<float> silu;
         std::vector<float> swiglu;
         std::vector<float> xOut;
 
@@ -168,7 +153,7 @@ TrainStepResult executeLM5MTrainStep(
             : hAttn(T * D), invStdAttn(T), q(T * D), k(T * D), v(T * D),
               attnWeights(H * T * T), outHeads(T * D), xMid(T * D),
               hFfn(T * D), invStdFfn(T), gate(T * DFF), up(T * DFF),
-              silu(T * DFF), swiglu(T * DFF), xOut(T * D) {}
+              swiglu(T * DFF), xOut(T * D) {}
     };
 
     std::vector<LayerCache> caches;
@@ -185,10 +170,9 @@ TrainStepResult executeLM5MTrainStep(
 
         // Attention Pre-RMSNorm. Weight matrices are stored output-major [out, in],
         // so forward projections use A * W^T (matmul mode 1). Batch tokens into
-        // one dispatch per projection to reduce per-token Vulkan submission overhead.
-        for (uint32_t t = 0; t < seqLen; ++t) {
-            lc.invStdAttn[t] = applyRmsNorm(&currentX[t * D], lw.attnNorm, &lc.hAttn[t * D], D);
-        }
+        // Batch RMSNorm over all token rows in a single compute dispatch where supported.
+        vkEngine.rmsNorm(currentX, lw.attnNorm, lc.hAttn.data(), lc.invStdAttn.data(),
+                         D, 1e-5f, seqLen, useVulkan);
         vkEngine.matmul(lc.hAttn.data(), lw.wq, lc.q.data(), seqLen, D, D, 1, useVulkan);
         vkEngine.matmul(lc.hAttn.data(), lw.wk, lc.k.data(), seqLen, D, D, 1, useVulkan);
         vkEngine.matmul(lc.hAttn.data(), lw.wv, lc.v.data(), seqLen, D, D, 1, useVulkan);
@@ -244,19 +228,13 @@ TrainStepResult executeLM5MTrainStep(
             lc.xMid[i] += currentX[i];
         }
 
-        // SwiGLU FFN. Batch each dense projection to avoid one Vulkan dispatch per token.
-        for (uint32_t t = 0; t < seqLen; ++t) {
-            lc.invStdFfn[t] = applyRmsNorm(&lc.xMid[t * D], lw.ffnNorm, &lc.hFfn[t * D], D);
-        }
+        // SwiGLU FFN: batched normalization, dense projections, and activation kernel.
+        vkEngine.rmsNorm(lc.xMid.data(), lw.ffnNorm, lc.hFfn.data(), lc.invStdFfn.data(),
+                         D, 1e-5f, seqLen, useVulkan);
         vkEngine.matmul(lc.hFfn.data(), lw.w1, lc.gate.data(), seqLen, D, DFF, 1, useVulkan);
         vkEngine.matmul(lc.hFfn.data(), lw.w3, lc.up.data(), seqLen, D, DFF, 1, useVulkan);
-        #pragma clang loop vectorize(enable)
-        for (uint32_t i = 0; i < seqLen * DFF; ++i) {
-            float z = lc.gate[i];
-            float sVal = z / (1.0f + std::exp(-z));
-            lc.silu[i] = sVal;
-            lc.swiglu[i] = sVal * lc.up[i];
-        }
+        vkEngine.swiglu(lc.gate.data(), lc.up.data(), lc.swiglu.data(),
+                        static_cast<uint32_t>(seqLen * DFF), useVulkan);
         // W2 is also stored [out, in], therefore transpose it for forward projection.
         vkEngine.matmul(lc.swiglu.data(), lw.w2, lc.xOut.data(), seqLen, DFF, D, 1, useVulkan);
         #pragma clang loop vectorize(enable)
@@ -267,12 +245,11 @@ TrainStepResult executeLM5MTrainStep(
         currentX = lc.xOut.data();
     }
 
-    // Final RMSNorm
+    // Final RMSNorm across all positions.
     std::vector<float> xFinal(seqLen * D);
     std::vector<float> invStdFinal(seqLen);
-    for (uint32_t t = 0; t < seqLen; ++t) {
-        invStdFinal[t] = applyRmsNorm(&currentX[t * D], finalNorm, &xFinal[t * D], D);
-    }
+    vkEngine.rmsNorm(currentX, finalNorm, xFinal.data(), invStdFinal.data(),
+                     D, 1e-5f, seqLen, useVulkan);
 
     // 2. LOSS & OUTPUT LOGITS GRADIENT
     uint32_t numTargets = seqLen - 1;
@@ -358,19 +335,11 @@ TrainStepResult executeLM5MTrainStep(
         std::vector<float> dGateAll(static_cast<size_t>(seqLen) * DFF);
         std::vector<float> dUpAll(static_cast<size_t>(seqLen) * DFF);
         vkEngine.matmul(dXCurrent.data(), lw.w2, dSwigluAll.data(), seqLen, D, DFF, 0, useVulkan);
-
+        vkEngine.swigluBackward(lc.gate.data(), lc.up.data(), dSwigluAll.data(),
+                                dGateAll.data(), dUpAll.data(),
+                                static_cast<uint32_t>(seqLen * DFF), useVulkan);
         for (uint32_t t = 0; t < seqLen; ++t) {
             std::memcpy(&dXMid[t * D], &dXCurrent[t * D], D * sizeof(float));
-            const size_t row = static_cast<size_t>(t) * DFF;
-            for (uint32_t j = 0; j < DFF; ++j) {
-                const float z = lc.gate[row + j];
-                const float sig = 1.0f / (1.0f + std::exp(-z));
-                const float siluVal = z * sig;
-                const float ds = dSwigluAll[row + j];
-                dUpAll[row + j] = ds * siluVal;
-                const float dsiluVal = ds * lc.up[row + j];
-                dGateAll[row + j] = dsiluVal * (sig + siluVal * (1.0f - sig));
-            }
         }
 
         // dW2 = dX^T * swiglu; dW1 = dGate^T * hFfn; dW3 = dUp^T * hFfn.
