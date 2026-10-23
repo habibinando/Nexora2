@@ -125,7 +125,7 @@ class NexoraTransformer(
     val mFinalNorm = FloatArray(config.dModel)
     val vFinalNorm = FloatArray(config.dModel)
 
-    // Flat backing arrays untuk akselerasi zero-copy JNI / Vulkan 1.2+
+    // Flat backing arrays untuk akselerasi zero-copy JNI / Vulkan compute
     val allWeights = FloatArray(config.totalParams.toInt())
     val allGrads = FloatArray(config.totalParams.toInt())
     val allM = FloatArray(config.totalParams.toInt())
@@ -770,7 +770,7 @@ class NexoraTransformer(
         val tLen = tokens.size
         if (tLen < 2) return Pair(0.0f, 0.0f)
 
-        // Akselerasi Native NDK / Vulkan 1.2+ GPU Compute Step
+        // Akselerasi Native NDK / Vulkan compute GPU Compute Step
         if (NexoraNative.isNdkLoaded) {
             try {
                 val step = adamStepCount.incrementAndGet().toInt()

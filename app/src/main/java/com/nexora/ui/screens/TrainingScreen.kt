@@ -258,9 +258,13 @@ fun TrainingScreen(
                         }
                     }
 
-                    // Badge Akselerasi Hardware (Vulkan 1.2+ GPU / NDK C++20 SIMD)
+                    // Badge akselerasi: versi API diambil dari status Vulkan runtime, bukan angka tetap.
+                    val detectedVulkanApi = trainingState.vulkanStatus
+                        .takeIf { it.startsWith("Vulkan device API ") }
+                        ?.substringAfter("Vulkan device API ")
+                        ?.substringBefore(" |")
                     val accelBadgeText = when {
-                        trainingState.isVulkanActive -> "Vulkan 1.2+ GPU"
+                        trainingState.isVulkanActive -> "Vulkan API ${detectedVulkanApi ?: "detected"}"
                         trainingState.isNdkActive -> "NDK SIMD C++20"
                         else -> "JVM Fallback"
                     }
